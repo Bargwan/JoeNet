@@ -625,3 +625,48 @@ class GameContext:
             'spatial': spatial,
             'scalar': scalar
         }
+
+    def get_action_mask(self, player_idx: int, state_id: str) -> np.ndarray:
+        """
+        Generates a 58-element boolean array masking illegal actions for the given phase.
+        Indices:
+        0: Pick_Stock, 1: Pick_Discard, 2: Call_MayI, 3: Pass
+        4: Go_Down, 5: Wait / End_Table_Play
+        6-57: Card identifiers (Discard or Play)
+        """
+        mask = np.zeros(58, dtype=bool)
+        player = self.players[player_idx]
+
+        if state_id == 'pickup_decision':
+            mask[0] = True  # Pick Stock is always legal
+            if len(self.discard_pile) > 0:
+                mask[1] = True  # Pick Discard requires a card in the pile
+
+        elif state_id == 'may_i_decision':
+            mask[2] = True  # Call May-I
+            mask[3] = True  # Pass
+
+        elif state_id == 'go_down_decision':
+            mask[4] = True  # Go Down
+            mask[5] = True  # Wait
+
+        elif state_id == 'discard_phase':
+            # Control actions are completely disabled.
+            # Only cards currently in the physical hand are legal to discard.
+            for card in player.hand_list:
+                # Calculate the exact offset: 6 + (Suit * 13) + Rank
+                card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
+                mask[card_idx] = True
+
+        elif state_id == 'table_play_phase':
+            mask[5] = True  # End Table Play
+            # Cards in hand are legal to attempt to play on the table
+            for card in player.hand_list:
+                card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
+                mask[card_idx] = True
+
+        else:
+            # We strictly enforce known states to prevent silent tensor failures
+            raise ValueError(f"Cannot generate action mask for unknown state: {state_id}")
+
+        return mask

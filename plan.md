@@ -25,13 +25,13 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Build the translation layer that converts the Python game state into strictly formatted NumPy tensors for the neural networks.*
 
 * **Step 2.1: Spatial Tensor Builder**
-    * [ ] Write tests for exactly 13 channels representing the public board (Suit/Rank dimensions: 4x14, handling duplicate wrap-around Aces).
-    * [ ] Ensure 3-player zero-padding is mathematically perfect for missing opponent channels.
+    * [x] Write tests for exactly 13 channels representing the public board (Suit/Rank dimensions: 4x14, handling duplicate wrap-around Aces).
+    * [x] Ensure 3-player zero-padding is mathematically perfect for missing opponent channels.
 * **Step 2.2: Scalar Tensor Builder**
-    * [ ] Write tests for the 28-feature 1D array (phases, stock depth, scores).
-    * [ ] Implement the `Is 3-Player Game?` flag and verify zero-padding for the missing opponent's scalars.
+    * [x] Write tests for the 28-feature 1D array (phases, stock depth, scores).
+    * [x] Implement the `Is 3-Player Game?` flag and verify zero-padding for the missing opponent's scalars.
 * **Step 2.3: Action Space & Masking Generator**
-    * [ ] Implement the dynamic 58-logit masking logic based on the `Active Phase`. Ensure illegal moves are strictly zeroed out.
+    * [x] Implement the dynamic 58-logit masking logic based on the `Active Phase`. Ensure illegal moves are strictly zeroed out.
 
 ---
 
