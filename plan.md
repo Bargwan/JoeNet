@@ -39,12 +39,12 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Implement the deterministic Potential-Based Reward Shaping math to resolve the Credit Assignment Problem.*
 
 * **Step 3.1: Combinatorial Outs Calculator (`Ukeire`)**
-    * [ ] Write tests to calculate required cards minus known dead cards, discounting dynamically based on a mocked `oracle_probs` tensor.
+    * [x] Write tests to calculate required cards minus known dead cards, discounting dynamically based on a mocked `oracle_probs` tensor.
 * **Step 3.2: Danger Score Calculator (`Betaori`)**
-    * [ ] Write tests for calculating the `Relative Deadwood Margin`.
-    * [ ] Verify the math allows the Danger Score to safely invert into a positive Potential bonus (the detonation strategy).
+    * [x] Write tests for calculating the `Relative Deadwood Margin`.
+    * [x] Verify the math allows the Danger Score to safely invert into a positive Potential bonus (the detonation strategy).
 * **Step 3.3: Asymmetric Terminal Scoring**
-    * [ ] Implement the terminal score calculator using the `catch_up` (2.0x) and `pull_ahead` (0.5x) multipliers. 
+    * [x] Implement the terminal score calculator using the `catch_up` (2.0x) and `pull_ahead` (0.5x) multipliers. 
 
 ---
 

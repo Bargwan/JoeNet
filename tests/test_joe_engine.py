@@ -7,6 +7,24 @@ from tests.test_utils import verify_mass_integrity
 
 
 class TestJoeEngine(unittest.TestCase):
+    """
+        Unit tests for the JoeEngine state machine.
+
+        ACTION INTEGER MAPPING REFERENCE:
+        To optimize for microsecond inference speed during RL data generation,
+        the engine uses strict integer routing instead of string comparisons.
+
+        Control Actions:
+            0 = PICK_STOCK
+            1 = PICK_DISCARD
+            2 = CALL_MAY_I
+            3 = PASS
+            4 = GO_DOWN
+            5 = WAIT (during go_down_decision) or END_TABLE_PLAY (during table_play_phase)
+
+        Card Actions (6 through 57):
+            Mapped dynamically using the formula: 6 + (Suit * 13) + Rank
+        """
 
     def setUp(self):
         self.ctx = GameContext()
