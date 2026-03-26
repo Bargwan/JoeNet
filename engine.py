@@ -107,27 +107,27 @@ class JoeEngine(StateMachine):
             | round_end.to(dealing)
     )
 
-    # ========================================================================
+# ========================================================================
     # 3. GUARDS (Conditionals)
     # ========================================================================
 
-    def action_is_discard(self, action):
-        return action == 'PICK_DISCARD'
+    def action_is_stock(self, action: int):
+        return action == 0  # PICK_STOCK
 
-    def action_is_stock(self, action):
-        return action == 'PICK_STOCK'
+    def action_is_discard(self, action: int):
+        return action == 1  # PICK_DISCARD
 
-    def action_is_go_down(self, action):
-        return action == 'GO_DOWN'
+    def action_is_call(self, action: int):
+        return action == 2  # CALL_MAY_I
 
-    def action_is_wait(self, action):
-        return action == 'WAIT'
+    def action_is_pass(self, action: int):
+        return action == 3  # PASS
 
-    def action_is_call(self, action):
-        return action == 'CALL_MAY_I'
+    def action_is_go_down(self, action: int):
+        return action == 4  # GO_DOWN
 
-    def action_is_pass(self, action):
-        return action == 'PASS'
+    def action_is_wait(self, action: int):
+        return action == 5  # WAIT
 
     def is_already_down(self):
         return self.ctx.active_player.is_down
@@ -176,10 +176,10 @@ class JoeEngine(StateMachine):
         logger.debug(
             f"--- START TURN: Player {self.ctx.active_player_idx} (Turn {self.ctx.current_turn}) ---")
 
-    def before_resolve_pickup(self, action):
-        if action == 'PICK_DISCARD':
+    def before_resolve_pickup(self, action: int):
+        if action == 1:  # PICK_DISCARD
             self.ctx.execute_pickup_discard()
-        elif action == 'PICK_STOCK':
+        elif action == 0:  # PICK_STOCK
             self.ctx.execute_pickup_stock()
             self.ctx.start_may_i_checks()
 
@@ -195,10 +195,10 @@ class JoeEngine(StateMachine):
     def before_skip_ineligible_target(self):
         self.ctx.advance_may_i_target()
 
-    def before_resolve_may_i(self, action):
-        if action == 'PASS':
+    def before_resolve_may_i(self, action: int):
+        if action == 3:  # PASS
             self.ctx.advance_may_i_target()
-        elif action == 'CALL_MAY_I':
+        elif action == 2:  # CALL_MAY_I
             self.ctx.execute_may_i_call()
 
     def on_enter_going_down(self):
@@ -208,11 +208,11 @@ class JoeEngine(StateMachine):
     def on_commit_melds(self):
         self.ctx.go_down(self.ctx.active_player_idx)
 
-    def on_enter_processing_table_play(self, card_index):
+    def on_enter_processing_table_play(self, card_index: int):
         self.ctx.execute_table_play(self.ctx.active_player_idx, card_index)
         self.evaluate_table_play()
 
-    def on_enter_processing_discard(self, card_index):
+    def on_enter_processing_discard(self, card_index: int):
         self.ctx.execute_discard(self.ctx.active_player_idx, card_index)
         self.evaluate_discard_result()
 

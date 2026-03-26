@@ -34,7 +34,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. Proceed with the flow
         self.engine.enter_pickup()
-        self.engine.resolve_pickup("PICK_DISCARD")
+        self.engine.resolve_pickup(1)
 
         # 5. ASSERT: Should now land on discard_phase every time
         self.assertEqual(
@@ -84,7 +84,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_pickup_discard_logic(self):
         """
-        Intent: Verify the mechanics of the PICK_DISCARD action during the pickup phase.
+        Intent: Verify the mechanics of the 1 action during the pickup phase.
         """
         # 1. Teleport the Data Layer
         self.ctx.active_player_idx = 0
@@ -104,7 +104,7 @@ class TestJoeEngine(unittest.TestCase):
         self.assertEqual(self.engine.current_state.id, "pickup_decision")
 
         # 3. ACT: Fire the transition
-        self.engine.resolve_pickup("PICK_DISCARD")
+        self.engine.resolve_pickup(1)
 
         # 4. ASSERT: State Routing
         self.assertEqual(self.engine.current_state.id, "discard_phase")
@@ -136,7 +136,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.pickup_decision
 
         # 3. ACT: Fire the transition
-        self.engine.resolve_pickup("PICK_STOCK")
+        self.engine.resolve_pickup(0)
 
         # 4. ASSERT: State Routing
         self.assertEqual(self.engine.current_state.id, "may_i_decision")
@@ -175,7 +175,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.pickup_decision
 
         # 3. ACT: Active Player (0) touches the stock
-        self.engine.resolve_pickup("PICK_STOCK")
+        self.engine.resolve_pickup(0)
 
         # 4. ASSERT: State Routing
         # The engine should pass through the automatic 'may_i_check' state,
@@ -221,7 +221,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.may_i_decision
 
         # 3. ACT: Interrupter calls the May-I
-        self.engine.resolve_may_i("CALL_MAY_I")
+        self.engine.resolve_may_i(2)
 
         # 4. ASSERT: State Routing
         self.assertEqual(self.engine.current_state.id, "discard_phase")
@@ -344,7 +344,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.go_down_decision
 
         # 3. ACT: Fire the GO_DOWN decision
-        self.engine.resolve_go_down("GO_DOWN")
+        self.engine.resolve_go_down(4)
 
         # Currently, your engine does not automatically trigger commit_melds()
         # when entering the 'going_down' state. We manually fire it here to
@@ -681,7 +681,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.may_i_decision
 
         # 3. ACT: Interrupter 1 passes
-        self.engine.resolve_may_i("PASS")
+        self.engine.resolve_may_i(3)
 
         # 4. ASSERT: State Routing and Pointer
         # The engine should loop back to may_i_check, automatically evaluate
@@ -724,7 +724,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.go_down_decision
 
         # 3. ACT: Fire the WAIT decision
-        self.engine.resolve_go_down("WAIT")
+        self.engine.resolve_go_down(5)
 
         # 4. ASSERT: State Routing
         self.assertEqual(
@@ -847,14 +847,14 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.pickup_decision
 
         # 3. ACT: Active player (1) picks from stock, starting the May-I loop.
-        self.engine.resolve_pickup("PICK_STOCK")
+        self.engine.resolve_pickup(0)
 
         # Engine should ask Player 2 first (Active + 1).
         self.assertEqual(self.engine.current_state.id, "may_i_decision")
         self.assertEqual(self.ctx.may_i_target_idx, 2)
 
         # Player 2 passes.
-        self.engine.resolve_may_i("PASS")
+        self.engine.resolve_may_i(3)
 
         # Engine should ask Player 3 next.
         self.assertEqual(self.engine.current_state.id, "may_i_decision")
@@ -862,7 +862,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ACT: Player 3 passes.
         # The pointer will now move to Player 0.
-        self.engine.resolve_may_i("PASS")
+        self.engine.resolve_may_i(3)
 
         # 5. ASSERT: The loop must terminate.
         # The engine's 'all_targets_checked' guard should instantly catch that

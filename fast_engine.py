@@ -68,12 +68,12 @@ class JoeEngine:
     def enter_pickup(self):
         self.current_state = self.pickup_decision
 
-    def resolve_pickup(self, action):
+    def resolve_pickup(self, action: int):
         self.before_resolve_pickup(action)
-        if action == 'PICK_DISCARD':
+        if action == 1:  # PICK_DISCARD
             self.current_state = self.processing_pickup
             self.on_enter_processing_pickup()
-        elif action == 'PICK_STOCK':
+        elif action == 0:  # PICK_STOCK
             self.current_state = self.may_i_check
             self.on_enter_may_i_check()
 
@@ -89,12 +89,12 @@ class JoeEngine:
         self.current_state = self.may_i_check
         self.on_enter_may_i_check()
 
-    def resolve_may_i(self, action):
+    def resolve_may_i(self, action: int):
         self.before_resolve_may_i(action)
-        if action == 'PASS':
+        if action == 3:  # PASS
             self.current_state = self.may_i_check
             self.on_enter_may_i_check()
-        elif action == 'CALL_MAY_I':
+        elif action == 2:  # CALL_MAY_I
             self.current_state = self.processing_pickup
             self.on_enter_processing_pickup()
 
@@ -108,11 +108,11 @@ class JoeEngine:
                 self.ctx.active_player_idx):
             self.current_state = self.go_down_decision
 
-    def resolve_go_down(self, action):
-        if action == 'GO_DOWN':
+    def resolve_go_down(self, action: int):
+        if action == 4:  # GO_DOWN
             self.current_state = self.going_down
             self.on_enter_going_down()
-        elif action == 'WAIT':
+        elif action == 5:  # WAIT
             self.current_state = self.discard_phase
 
     def commit_melds(self):
@@ -173,10 +173,10 @@ class JoeEngine:
         logger.debug(
             f"--- START TURN: Player {self.ctx.active_player_idx} (Turn {self.ctx.current_turn}) ---")
 
-    def before_resolve_pickup(self, action):
-        if action == 'PICK_DISCARD':
+    def before_resolve_pickup(self, action: int):
+        if action == 1:  # PICK_DISCARD
             self.ctx.execute_pickup_discard()
-        elif action == 'PICK_STOCK':
+        elif action == 0:  # PICK_STOCK
             self.ctx.execute_pickup_stock()
             self.ctx.start_may_i_checks()
 
@@ -192,10 +192,10 @@ class JoeEngine:
     def before_skip_ineligible_target(self):
         self.ctx.advance_may_i_target()
 
-    def before_resolve_may_i(self, action):
-        if action == 'PASS':
+    def before_resolve_may_i(self, action: int):
+        if action == 3:  # PASS
             self.ctx.advance_may_i_target()
-        elif action == 'CALL_MAY_I':
+        elif action == 2:  # CALL_MAY_I
             self.ctx.execute_may_i_call()
 
     def on_enter_going_down(self):
