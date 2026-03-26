@@ -10,14 +10,14 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Audit and port the legacy game environment, ensuring it perfectly aligns with the new data layer requirements and is free of CFR-specific trackers.*
 
 * **Step 1.1: Core Configuration & Entities (`config.py`, `card.py`, `player.py`)**
-    * [ ] Update `JoeConfig` to include the new asymmetric terminal scoring multipliers (`catch_up_multiplier`, `pull_ahead_multiplier`).
-    * [ ] Refactor `Player` to ensure it cleanly separates Logic State (Card objects) from NN State (pre-computed Numpy arrays).
+    * [x] Update `JoeConfig` to include the new asymmetric terminal scoring multipliers (`catch_up_multiplier`, `pull_ahead_multiplier`).
+    * [x] Refactor `Player` to ensure it cleanly separates Logic State (Card objects) from NN State (pre-computed Numpy arrays).
 * **Step 1.2: The Ground Truth (`game_context.py`)**
-    * [ ] *Action:* Strip out any old CFR regret tracking or history tree logic.
-    * [ ] *Feature:* Implement and test the `get_oracle_truth(active_player_idx)` method to return the exact `(3, 4, 14)` tensor of opponent hands with strict zero-padding for 3-player games.
+    * [x] *Action:* Strip out any old CFR regret tracking or history tree logic.
+    * [x] *Feature:* Implement and test the `get_oracle_truth(active_player_idx)` method to return the exact `(3, 4, 14)` tensor of opponent hands with strict zero-padding for 3-player games.
 * **Step 1.3: The Dual Engines (`engine.py` & `fast_engine.py`)**
-    * [ ] *Action:* Strip out all Monte Carlo rollout hooks or CFR node tracking.
-    * [ ] *Feature:* Verify state transitions and ensure the game strictly ends the moment a hand is empty. 
+    * [x] *Action:* Strip out all Monte Carlo rollout hooks or CFR node tracking.
+    * [x] *Feature:* Verify state transitions and ensure the game strictly ends the moment a hand is empty. 
 
 ---
 
@@ -66,21 +66,41 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Generate the foundational ground truth and run Behavioral Cloning.*
 
 * **Step 5.1: The Heuristic Agent**
-    * [ ] Build the hardcoded bot. *Crucial:* Implement a "panic" threshold so it does not permanently sandbag and pollute the dataset.
+    * [ ] Build the hardcoded bot, including a "panic" threshold to prevent permanent sandbagging from polluting the dataset.
 * **Step 5.2: Data Generation (HDF5 Buffer)**
-    * [ ] Build the high-speed writer to record `spatial`, `scalar`, `action_mask`, `oracle_truth`, `terminal_score`, and `policy` arrays. Run Phase 1 data generation.
+    * [ ] Build the high-speed writer to record `spatial`, `scalar`, `action_mask`, `oracle_truth`, `terminal_score`, and `policy` arrays. 
+    * [ ] Run Phase 1 sandbox data generation.
 * **Step 5.3: Supervised Training Loop (Phase 2)**
-    * [ ] Build the PyTorch Dataloaders and the backpropagation loop for Behavioral Cloning and Monte Carlo Critic regression.
+    * [ ] Build the PyTorch Dataloaders and the backpropagation loop for Behavioral Cloning (Actor) and Monte Carlo regression (Critic).
 
 ---
 
-## Phase 6: Phase 3 & 4 Execution (RL Self-Play)
-*Goal: Implement TD Learning to un-learn heuristic flaws and achieve superhuman mastery.*
+## Phase 6: The Arena (Evaluation & Benchmarking)
+*Goal: Build the tournament runner to accurately measure macro-level performance. This MUST be built before RL begins so we can benchmark the Phase 2 cloned agent against the baseline.*
 
-* **Step 6.1: TD Target & Rollout Buffer**
+* **Step 6.1: Agent Wrappers**
+    * [ ] Wrap the `RandomAgent` (acts purely on masked logits).
+    * [ ] Wrap the `HeuristicAgent` (acts on hardcoded rules).
+    * [ ] Wrap the `JoeNetAgent` (acts on trained neural weights).
+* **Step 6.2: The Tournament Runner**
+    * [ ] Build a lightweight simulation wrapper that sequentially executes a full 7-round game, tracking running scores across the phase transitions.
+* **Step 6.3: Metric Tracking & Logging**
+    * [ ] Track `Tournament Win %`, `Round Win %`, and `Average Point Differential`.
+    * [ ] Implement a tracker for "Strategic Detonations" (intentional early round ends).
+* **Step 6.4: The Baseline Evaluation**
+    * [ ] Run the Phase 2 Cloned agent through the Arena to verify it successfully learned the baseline heuristics.
+
+---
+
+## Phase 7: Phase 3 & 4 Execution (RL Self-Play)
+*Goal: Implement TD Learning to un-learn heuristic flaws and achieve superhuman mastery, using the Arena to continuously measure growth.*
+
+* **Step 7.1: TD Target & Rollout Buffer**
     * [ ] Build the temporary Rollout Buffer to store step-by-step `[State, Action, Reward, Next_State]` packages.
     * [ ] Implement the TD Error math calculation for batch updates.
-* **Step 6.2: Phase 3 (Exploratory Training Loop)**
+* **Step 7.2: Phase 3 (Exploratory Training Loop)**
     * [ ] Implement entropy injection for forced exploration.
-* **Step 6.3: Phase 4 (Mastery Training Loop)**
+    * [ ] Execute the reinforcement training loop using PBRS step rewards.
+* **Step 7.3: Phase 4 (Mastery Training Loop)**
     * [ ] Remove exploration constraints and finalize evaluation parameters.
+    * [ ] Run the final JoeNet model through the Arena to prove superhuman tournament performance.
