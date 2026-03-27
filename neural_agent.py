@@ -42,3 +42,34 @@ class NeuralAgent(Agent):
         best_action_idx = torch.argmax(logits, dim=1).item()
 
         return int(best_action_idx)
+
+    def compute_action_with_exploration(self, logits: torch.Tensor, mask: np.ndarray,
+                                        temperature: float = 1.0) -> int:
+        """
+        Processes raw logits with temperature scaling and strict masking
+        to return an exploratory action index.
+        """
+        # Convert mask to torch tensor on the correct device
+        mask_tensor = torch.from_numpy(mask).to(self.device)
+
+        if temperature <= 0:
+            # Greedy Case: Ignore the values and pick the highest valid logit
+            # We must mask first to avoid picking a masked high logit
+            masked_logits = logits.masked_fill(~mask_tensor, -1e9)
+            return int(torch.argmax(masked_logits).item())
+
+        # 1. Scale logits by Temperature
+        scaled_logits = logits / temperature
+
+        # 2. THE DOUBLE-LOCK: Re-apply mask after division to ensure illegal moves
+        # stay at -infinity regardless of how high the temperature is.
+        masked_logits = scaled_logits.masked_fill(~mask_tensor, -1e9)
+
+        # 3. Convert to Probabilities
+        probs = torch.softmax(masked_logits, dim=-1)
+
+        # 4. Sample from the distribution
+        # multinomial(1) picks one index based on the weights in 'probs'
+        action = torch.multinomial(probs, num_samples=1)
+
+        return int(action.item())

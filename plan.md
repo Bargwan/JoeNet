@@ -96,8 +96,8 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Implement TD Learning to un-learn heuristic flaws and achieve superhuman mastery, using the Arena to continuously measure growth.*
 
 * **Step 7.1: TD Target & Rollout Buffer**
-    * [ ] Build the temporary Rollout Buffer to store step-by-step `[State, Action, Reward, Next_State]` packages.
-    * [ ] Implement the TD Error math calculation for batch updates.
+    * [x] Build the temporary Rollout Buffer to store step-by-step `[State, Action, Reward, Next_State]` packages.
+    * [x] Implement the TD Error math calculation for batch updates.
 * **Step 7.2: Phase 3 (Exploratory Training Loop)**
     * [ ] Implement entropy injection for forced exploration.
     * [ ] Execute the reinforcement training loop using PBRS step rewards.
