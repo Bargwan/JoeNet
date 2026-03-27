@@ -203,3 +203,30 @@ class ActorNet(nn.Module):
             logits = logits.masked_fill(~action_mask, -1e9)
 
         return logits
+
+
+class JoeNet(nn.Module):
+    """
+    The unified Deep Reinforcement Learning Architecture.
+    Combines the Belief State (Oracle) with the Actor-Critic decision makers.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.oracle = OracleNet()
+        self.critic = CriticNet()
+        self.actor = ActorNet()
+
+    def forward(self, spatial_x: torch.Tensor, scalar_x: torch.Tensor,
+                action_mask: torch.Tensor = None):
+        # 1. Oracle predicts the hidden opponent hands
+        oracle_probs = self.oracle(spatial_x, scalar_x)
+
+        # 2. The Concatenation Trick: Expand public vision with predicted hidden vision
+        expanded_spatial = expand_spatial_with_oracle(spatial_x, oracle_probs)
+
+        # 3. Actor and Critic evaluate the expanded reality
+        ev = self.critic(expanded_spatial, scalar_x)
+        logits = self.actor(expanded_spatial, scalar_x, action_mask)
+
+        return logits, ev, oracle_probs

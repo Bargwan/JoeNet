@@ -110,9 +110,13 @@ class TestJoeEngine(unittest.TestCase):
         target_card = Card(Suit.SPADES, Rank.ACE, deck_index=0)
         self.ctx.discard_pile.append(target_card)
 
+        # NEW: Give the player a card so the engine doesn't instantly end the game!
+        dummy_card = self.ctx.deck.pop()
+        self.ctx.active_player.receive_cards([dummy_card])
+
         # Verify baseline data state
         self.assertEqual(len(self.ctx.discard_pile), 1)
-        self.assertEqual(len(self.ctx.active_player.hand_list), 0)
+        self.assertEqual(len(self.ctx.active_player.hand_list), 1)  # Changed from 0 to 1
 
         # --- INTEGRITY CHECK: Snapshot mass before action ---
         initial_mass = verify_mass_integrity(self, self.ctx)

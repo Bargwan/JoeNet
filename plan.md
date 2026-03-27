@@ -79,16 +79,16 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Build the tournament runner to accurately measure macro-level performance. This MUST be built before RL begins so we can benchmark the Phase 2 cloned agent against the baseline.*
 
 * **Step 6.1: Agent Wrappers**
-    * [ ] Wrap the `RandomAgent` (acts purely on masked logits).
-    * [ ] Wrap the `HeuristicAgent` (acts on hardcoded rules).
-    * [ ] Wrap the `JoeNetAgent` (acts on trained neural weights).
+    * [x] Wrap the `RandomAgent` (acts purely on masked logits).
+    * [x] Wrap the `HeuristicAgent` (acts on hardcoded rules).
+    * [x] Wrap the `JoeNetAgent` (acts on trained neural weights).
 * **Step 6.2: The Tournament Runner**
-    * [ ] Build a lightweight simulation wrapper that sequentially executes a full 7-round game, tracking running scores across the phase transitions.
+    * [x] Build a lightweight simulation wrapper that sequentially executes a full 7-round game, tracking running scores across the phase transitions.
 * **Step 6.3: Metric Tracking & Logging**
-    * [ ] Track `Tournament Win %`, `Round Win %`, and `Average Point Differential`.
-    * [ ] Implement a tracker for "Strategic Detonations" (intentional early round ends).
+    * [x] Track `Tournament Win %`, `Round Win %`, and `Average Point Differential`.
+    * [x] Implement a tracker for "Strategic Detonations" (intentional early round ends).
 * **Step 6.4: The Baseline Evaluation**
-    * [ ] Run the Phase 2 Cloned agent through the Arena to verify it successfully learned the baseline heuristics.
+    * [x] Run the Phase 2 Cloned agent through the Arena to verify it successfully learned the baseline heuristics.
 
 ---
 

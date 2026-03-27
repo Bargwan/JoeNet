@@ -23,11 +23,15 @@ def load_buffer_to_ram(filepath: str) -> TensorDataset:
     # Cast to PyTorch tensors
     # CNNs require float32 inputs, so we cast the int8 spatial tensor here
     t_spatial = torch.tensor(np_spatial, dtype=torch.float32)
+    # We must scale the presence channels by 2.0 to match the live Arena preprocessing
+    presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    t_spatial[:, presence_channels, :, :] /= 2.0
     t_scalar = torch.tensor(np_scalar, dtype=torch.float32)
     t_mask = torch.tensor(np_mask, dtype=torch.bool)
 
-    # BCE Loss requires float32 targets, so we cast the int8 oracle truth here
-    t_oracle = torch.tensor(np_oracle, dtype=torch.float32)
+    # BCE Loss strictly requires targets between 0.0 and 1.0.
+    # Because players can hold duplicates (value = 2), we clamp it to a binary presence mask.
+    t_oracle = torch.tensor(np_oracle, dtype=torch.float32).clamp(max=1.0)
     t_score = torch.tensor(np_score, dtype=torch.float32)
     t_policy = torch.tensor(np_policy, dtype=torch.float32)
 
@@ -90,3 +94,48 @@ def train_supervised_epoch(model, dataloader, optimizer, device):
         'oracle_loss': total_oracle_loss / num_batches,
         'total_loss': total_combined_loss / num_batches
     }
+
+
+if __name__ == "__main__":
+    from torch.utils.data import DataLoader
+    from network import JoeNet
+    import os
+
+    # 1. Configuration
+    data_path = "joe_phase1_sandbox.h5"
+    save_path = "models/joenet_phase2_cloned.pth"
+    batch_size = 512
+    epochs = 10
+    learning_rate = 1e-3
+
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Cannot find training data at {data_path}. Did you run the generator?")
+
+    # 2. Device Setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"--- Starting Phase 2: Behavioral Cloning ---")
+    print(f"Device: {device}")
+
+    # 3. Load Data
+    print(f"Loading HDF5 buffer into RAM...")
+    dataset = load_buffer_to_ram(data_path)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    print(f"Dataset Loaded: {len(dataset)} total steps.")
+
+    # 4. Initialize Model & Optimizer
+    model = JoeNet().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # 5. Training Loop
+    for epoch in range(epochs):
+        metrics = train_supervised_epoch(model, dataloader, optimizer, device)
+
+        print(f"Epoch {epoch + 1}/{epochs} | "
+              f"Actor Loss: {metrics['actor_loss']:.4f} | "
+              f"Critic Loss: {metrics['critic_loss']:.4f} | "
+              f"Oracle Loss: {metrics['oracle_loss']:.4f}")
+
+    # 6. Save the final weights
+    torch.save(model.state_dict(), save_path)
+    print(f"--- Training Complete! Weights saved to {save_path} ---")
