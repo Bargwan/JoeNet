@@ -51,6 +51,24 @@ class TestConfigurationInjection(unittest.TestCase):
         self.assertEqual(custom_config.catch_up_multiplier, 3.0)
         self.assertEqual(custom_config.pull_ahead_multiplier, 0.1)
 
+    def test_turn_and_action_limits(self):
+        """
+        Verify config cleanly separates board circuits (turns)
+        from individual decisions (actions).
+        """
+        config = JoeConfig()
+
+        self.assertTrue(hasattr(config, 'max_turns'))
+        self.assertTrue(hasattr(config, 'max_actions'))
+
+        # A 104-card double deck, minus 44 dealt cards = 60 cards in stock.
+        # ~15 circuits of a 4-player table will naturally exhaust the stock pile.
+        self.assertEqual(config.max_turns, 30)
+
+        # Actions will greatly outnumber turns due to May-Is and multi-phase decisions.
+        self.assertGreater(config.max_actions, config.max_turns * 4,
+                           "Action limit must be vastly larger than the turn limit!")
+
 
 if __name__ == '__main__':
     unittest.main()

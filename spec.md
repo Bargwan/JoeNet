@@ -115,8 +115,8 @@ $$Effective\ Outs=Total\ Remaining-\sum_{i \in Opponents}P(Player_i\ holds\ card
 The engine calculates the required cards to fulfill objectives, subtracting dead cards and probabilistically discounting cards the `OracleNet` predicts opponents are holding.
 
 ### 5.2 Danger Score (Betaori)
-$$Danger(card)=P(\text{Opponent Needs Card})\times(\text{Relative Deadwood Margin})$$
-The Relative Deadwood Margin is calculated as `(Active Player Deadwood) - (Average Expected Opponent Deadwood)`. This allows the Danger Score to flip negative (becoming a positive Potential bonus) if the agent is trailing significantly and feeding an opponent to force the round to end is the optimal mathematical play.
+$$Danger(card)=P(\text{Opponent Needs Card})\times(\text{Projected Asymmetric Margin})$$
+The Projected Asymmetric Margin calculates the overall tournament score impact if the opponent goes out. It compares the agent's projected tournament score (Current Score + Hand Deadwood) against the opponent's projected tournament score (Current Score + 0), and scales the difference using the Asymmetric Multipliers. This allows the Danger Score to flip negative (becoming a positive Potential bonus) *only* if detonating on a trailing player mathematically secures the agent's tournament position.
 
 ### 5.3 Asymmetric Terminal Scoring
 The absolute "Ground Truth" fed to the Critic at the end of a round is scaled to encode tournament awareness (Risk Aversion vs. Desperation). 

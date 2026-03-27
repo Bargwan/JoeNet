@@ -168,7 +168,9 @@ class TestGameContext(unittest.TestCase):
         # Initialize a 3-player game to test zero-padding
         ctx = GameContext(num_players=3)
         ctx.current_round_idx = 4
-        ctx.current_turn = 200
+
+        # MOCK: 30 actions in a 3-player game = 10 circuits
+        ctx.total_actions = 30
 
         # Mock some player data
         ctx.players[0].is_down = True
@@ -485,6 +487,7 @@ class TestMeldValidation(unittest.TestCase):
 
         self.assertEqual(mock_tensor[suit_idx, ace_low_idx], 10, "Ace Low exceeded safety cap.")
         self.assertEqual(mock_tensor[suit_idx, ace_high_idx], 10, "Ace High exceeded safety cap.")
+
 
 
 class TestSpatialTensorMapping(unittest.TestCase):

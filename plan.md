@@ -52,13 +52,13 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Build the deep learning models ensuring strict dimensional contracts and the Oracle concatenation trick.*
 
 * **Step 4.1: Shared Representation Heads**
-    * [ ] Build the `SpatialHead` (CNN with asymmetric branches for Runs vs Sets) and `ScalarHead` (MLP).
+    * [x] Build the `SpatialHead` (CNN with asymmetric branches for Runs vs Sets) and `ScalarHead` (MLP).
 * **Step 4.2: OracleNet & The Concat Trick**
-    * [ ] Build `OracleNet` to output the `(B, 3, 4, 14)` sigmoid probabilities.
-    * [ ] Implement the exact channel concatenation to create the 16-channel Expanded Spatial Tensor.
+    * [x] Build `OracleNet` to output the `(B, 3, 4, 14)` sigmoid probabilities.
+    * [x] Implement the exact channel concatenation to create the 16-channel Expanded Spatial Tensor.
 * **Step 4.3: ActorNet & CriticNet**
-    * [ ] Build `CriticNet` (outputting `(B, 1)` linear EV).
-    * [ ] Build `ActorNet` (outputting `(B, 58)` masked logits).
+    * [x] Build `CriticNet` (outputting `(B, 1)` linear EV).
+    * [x] Build `ActorNet` (outputting `(B, 58)` masked logits).
 
 ---
 
@@ -66,12 +66,12 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 *Goal: Generate the foundational ground truth and run Behavioral Cloning.*
 
 * **Step 5.1: The Heuristic Agent**
-    * [ ] Build the hardcoded bot, including a "panic" threshold to prevent permanent sandbagging from polluting the dataset.
+    * [x] Build the hardcoded bot, including a "panic" threshold to prevent permanent sandbagging from polluting the dataset.
 * **Step 5.2: Data Generation (HDF5 Buffer)**
-    * [ ] Build the high-speed writer to record `spatial`, `scalar`, `action_mask`, `oracle_truth`, `terminal_score`, and `policy` arrays. 
-    * [ ] Run Phase 1 sandbox data generation.
+    * [x] Build the high-speed writer to record `spatial`, `scalar`, `action_mask`, `oracle_truth`, `terminal_score`, and `policy` arrays. 
+    * [x] Run Phase 1 sandbox data generation.
 * **Step 5.3: Supervised Training Loop (Phase 2)**
-    * [ ] Build the PyTorch Dataloaders and the backpropagation loop for Behavioral Cloning (Actor) and Monte Carlo regression (Critic).
+    * [x] Build the PyTorch Dataloaders and the backpropagation loop for Behavioral Cloning (Actor) and Monte Carlo regression (Critic).
 
 ---
 

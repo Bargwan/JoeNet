@@ -159,7 +159,7 @@ class JoeEngine(StateMachine):
         return self.ctx.current_round_idx >= 7
 
     def max_turns_reached(self):
-        return self.ctx.current_turn >= self.ctx.config.max_turns
+        return self.ctx.total_actions >= self.ctx.config.max_actions
 
     # ========================================================================
     # 4. CALLBACKS (Action Hooks)
@@ -172,9 +172,9 @@ class JoeEngine(StateMachine):
 
     def on_enter_start_turn(self):
         self.ctx.rotate_player()
-        self.ctx.advance_turn_counter()
+        self.ctx.advance_action_counter()
         logger.debug(
-            f"--- START TURN: Player {self.ctx.active_player_idx} (Turn {self.ctx.current_turn}) ---")
+            f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Action {self.ctx.total_actions}) ---")
 
     def before_resolve_pickup(self, action: int):
         if action == 1:  # PICK_DISCARD

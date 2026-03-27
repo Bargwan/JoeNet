@@ -641,46 +641,34 @@ class TestJoeEngine(unittest.TestCase):
             "The round index should increment by 1 after scores are calculated."
         )
 
-    def test_turn_counter_progression_and_reset(self):
+    def test_action_counter_progression_and_reset(self):
         """
-        Verify that the current_turn counter increments on start_turn
-        and correctly resets to 0 when a new round is dealt.
+        Verify that total_actions increments correctly during turns
+        and that current_circuit accurately calculates full board loops.
         """
-        # 1. Initial state
-        self.assertEqual(
-            self.ctx.current_turn,
-            0,
-            "Turn counter should initialize at 0."
-        )
+        # 1. Start of game (0 actions)
+        self.ctx.execute_deal()  # <--- FIX: Physically deal cards and reset math
+        self.engine.deal_cards()  # Trigger state transition
 
-        # 2. Start game and deal (Transitions: setup -> dealing -> start_turn)
-        self.engine.start_game()
+        self.assertEqual(self.ctx.total_actions, 1, "First turn should be action 1")
+        self.assertEqual(self.ctx.current_circuit, 0, "Not a full circuit yet")
+
+        # 2. Simulate a full round of discards to complete 1 circuit (4 actions total)
+        self.engine.perform_discard(0)  # P0's turn -> Advances to Action 2
+        self.engine.perform_discard(0)  # P1's turn -> Advances to Action 3
+        self.engine.perform_discard(0)  # P2's turn -> Advances to Action 4
+
+        # We are now on Player 3's turn, having completed 1 full circuit
+        self.assertEqual(self.ctx.total_actions, 4)
+        self.assertEqual(self.ctx.current_circuit, 1)
+
+        # 3. Force a round transition (e.g. by someone going out)
+        # We simulate the reset by manually triggering the deal again
+        self.ctx.execute_deal()  # <--- FIX: Physically deal cards and reset math
         self.engine.deal_cards()
 
-        # 3. Assert Increment
-        self.assertEqual(
-            self.ctx.current_turn,
-            1,
-            "Turn counter should be 1 after the first start_turn transition."
-        )
-
-        # 4. Simulate a second turn starting
-        self.engine.on_enter_start_turn()
-        self.assertEqual(
-            self.ctx.current_turn,
-            2,
-            "Turn counter should increment to 2 on the next turn."
-        )
-
-        # 5. Trigger a new deal (Next Round)
-        self.ctx.execute_deal()
-
-        # 6. Assert Reset
-        self.assertEqual(
-            self.ctx.current_turn,
-            0,
-            "Turn counter must reset to 0 during a new deal."
-        )
+        self.assertEqual(self.ctx.total_actions, 1, "Action counter must reset on new deal")
+        self.assertEqual(self.ctx.current_circuit, 0)
 
     def test_may_i_decision_action_pass(self):
         """

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
+
 @dataclass
 class JoeConfig:
     """
@@ -12,7 +13,13 @@ class JoeConfig:
     points_eight_to_king: int = 10
     points_two_to_seven: int = 5
 
-    max_turns: int = 400
+    # A "turn" is defined as one complete circuit of the board (all players).
+    # 15 circuits will roughly exhaust the 60-card Stock Pile once.
+    max_turns: int = 30
+
+    # An "action" is an individual decision point (Pickup, May-I, Discard, etc.)
+    # Used strictly as an absolute engine failsafe against infinite RL loops.
+    max_actions: int = 500
 
     # RL Hyperparameters for Asymmetric Terminal Scoring
     catch_up_multiplier: float = 2.0

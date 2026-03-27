@@ -141,7 +141,10 @@ class JoeEngine:
         if len(self.ctx.active_player.hand_list) == 0:
             self.current_state = self.round_end
             self.on_enter_round_end()
-        elif self.ctx.current_turn >= self.ctx.config.max_turns:
+        elif self.ctx.total_actions >= self.ctx.config.max_actions:
+            self.current_state = self.round_end
+            self.on_enter_round_end()
+        elif self.ctx.current_circuit >= self.ctx.config.max_turns:
             self.current_state = self.round_end
             self.on_enter_round_end()
         else:
@@ -166,12 +169,12 @@ class JoeEngine:
 
     def on_enter_start_turn(self):
         self.ctx.rotate_player()
-        self.ctx.advance_turn_counter()
+        self.ctx.advance_action_counter()
 
         # NOTE: You may want to comment this debug line out during Phase 1 Data Generation
         # to save string-formatting micro-seconds across the millions of turns.
         logger.debug(
-            f"--- START TURN: Player {self.ctx.active_player_idx} (Turn {self.ctx.current_turn}) ---")
+            f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Action {self.ctx.total_actions}) ---")
 
     def before_resolve_pickup(self, action: int):
         if action == 1:  # PICK_DISCARD

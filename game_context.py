@@ -36,7 +36,7 @@ class GameContext:
         self.active_player_idx = 0
         self.dealer_idx = 0
         self.current_round_idx = 0
-        self.current_turn = 0
+        self.total_actions = 0
         self.may_i_target_idx = None
 
     # --- Turn Management ---
@@ -46,11 +46,16 @@ class GameContext:
         """Returns the Player object for the current turn."""
         return self.players[self.active_player_idx]
 
+    @property
+    def current_circuit(self):
+        """Returns the number of full board circuits completed (strategic turns)."""
+        return self.total_actions // self.num_players
+
     def execute_deal(self):
         """
         Resets the board, shuffles deck, deals 11 cards to each player, and flips one to discard.
         """
-        self.current_turn = 0
+        self.total_actions = 0
 
         # --- FULL BOARD RESET FOR NEW ROUND ---
         self.deck = create_double_deck()
@@ -94,9 +99,9 @@ class GameContext:
         # Active player usually starts to the left of dealer
         self.active_player_idx = self.dealer_idx
 
-    def advance_turn_counter(self):
-        """Increments the global turn counter for NN time-channel tracking."""
-        self.current_turn += 1
+    def advance_action_counter(self):
+        """Increments the global action counter for absolute engine safety."""
+        self.total_actions += 1
 
     def calculate_scores(self):
         """
@@ -493,7 +498,7 @@ class GameContext:
         new_ctx.active_player_idx = self.active_player_idx
         new_ctx.dealer_idx = self.dealer_idx
         new_ctx.current_round_idx = self.current_round_idx
-        new_ctx.current_turn = self.current_turn
+        new_ctx.total_actions = self.total_actions
 
         if hasattr(self, 'may_i_target_idx'):
             new_ctx.may_i_target_idx = self.may_i_target_idx
@@ -584,8 +589,9 @@ class GameContext:
         # 0-6: Round Objective (One-Hot)
         scalar[self.current_round_idx] = 1.0
 
-        # 7: Turn Number
-        scalar[7] = min(self.current_turn / 400.0, 1.0)
+        # 7: Circuit Progress (Strategic Turn Number)
+        max_circuits = getattr(self.config, 'max_turns', 15)
+        scalar[7] = min(self.current_circuit / float(max_circuits), 1.0)
 
         # 8: Stock Depth
         scalar[8] = len(self.deck) / 104.0
