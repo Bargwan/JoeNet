@@ -39,8 +39,10 @@ class TestRolloutBuffer(unittest.TestCase):
         mask = np.ones(58, dtype=bool)
 
         # Add 3 mock steps to simulate a short game
+        dummy_oracle = np.zeros((3, 4, 14), dtype=np.int8)
         for i in range(3):
-            self.buffer.add(spatial, scalar, mask, action=i, reward=float(i), is_terminal=(i == 2))
+            self.buffer.add(spatial, scalar, mask, action=i, reward=float(i),
+                            is_terminal=(i == 2), oracle_truth=dummy_oracle)
 
         # 2. ACT: Extract as tensors
         tensors = self.buffer.get_tensors()

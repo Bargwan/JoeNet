@@ -15,11 +15,11 @@ class JoeConfig:
 
     # A "turn" is defined as one complete circuit of the board (all players).
     # 15 circuits will roughly exhaust the 60-card Stock Pile once.
-    max_turns: int = 30
+    max_turns: int = 100
 
     # An "action" is an individual decision point (Pickup, May-I, Discard, etc.)
     # Used strictly as an absolute engine failsafe against infinite RL loops.
-    max_actions: int = 500
+    max_actions: int = 1000
 
     # RL Hyperparameters for Asymmetric Terminal Scoring
     catch_up_multiplier: float = 2.0

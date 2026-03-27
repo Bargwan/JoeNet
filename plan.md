@@ -99,8 +99,8 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
     * [x] Build the temporary Rollout Buffer to store step-by-step `[State, Action, Reward, Next_State]` packages.
     * [x] Implement the TD Error math calculation for batch updates.
 * **Step 7.2: Phase 3 (Exploratory Training Loop)**
-    * [ ] Implement entropy injection for forced exploration.
-    * [ ] Execute the reinforcement training loop using PBRS step rewards.
+    * [x] Implement entropy injection for forced exploration.
+    * [x] Execute the reinforcement training loop using PBRS step rewards.
 * **Step 7.3: Phase 4 (Mastery Training Loop)**
     * [ ] Remove exploration constraints and finalize evaluation parameters.
     * [ ] Run the final JoeNet model through the Arena to prove superhuman tournament performance.

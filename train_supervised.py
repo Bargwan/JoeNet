@@ -31,9 +31,13 @@ def load_buffer_to_ram(filepath: str) -> TensorDataset:
 
     # BCE Loss strictly requires targets between 0.0 and 1.0.
     # Because players can hold duplicates (value = 2), we clamp it to a binary presence mask.
-    t_oracle = torch.tensor(np_oracle, dtype=torch.float32).clamp(max=1.0)
+    t_oracle = torch.tensor(np_oracle, dtype=torch.float32).clamp(min=0.0, max=1.0)
     t_score = torch.tensor(np_score, dtype=torch.float32)
-    t_policy = torch.tensor(np_policy, dtype=torch.float32)
+
+    # CrossEntropyLoss ALSO strictly requires soft targets to be between 0.0 and 1.0.
+    # We clamp to erase any float32 precision drift (e.g., 1.0000001) from Phase 1.
+    t_policy = torch.tensor(np_policy, dtype=torch.float32).clamp(min=0.0, max=1.0)
+    t_policy = t_policy / (t_policy.sum(dim=-1, keepdim=True) + 1e-8)
 
     return TensorDataset(t_spatial, t_scalar, t_mask, t_oracle, t_score, t_policy)
 

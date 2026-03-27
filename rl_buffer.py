@@ -10,7 +10,7 @@ class RolloutBuffer:
         self.clear()
 
     def add(self, spatial: np.ndarray, scalar: np.ndarray, mask: np.ndarray,
-            action: int, reward: float, is_terminal: bool):
+            action: int, reward: float, is_terminal: bool, oracle_truth: np.ndarray = None):
         """Stores a single step of the game into RAM."""
         self.spatial.append(spatial)
         self.scalar.append(scalar)
@@ -18,6 +18,7 @@ class RolloutBuffer:
         self.action.append(action)
         self.reward.append(reward)
         self.is_terminal.append(is_terminal)
+        self.oracle_truth.append(oracle_truth)
 
     def clear(self):
         """Wipes the buffer clean for the next game."""
@@ -27,6 +28,7 @@ class RolloutBuffer:
         self.action = []
         self.reward = []
         self.is_terminal = []
+        self.oracle_truth = []
 
     def __len__(self):
         return len(self.spatial)
@@ -46,6 +48,7 @@ class RolloutBuffer:
         np_action = np.array(self.action, dtype=np.int64)
         np_reward = np.array(self.reward, dtype=np.float32)
         np_is_terminal = np.array(self.is_terminal, dtype=np.bool_)
+        np_oracle = np.stack(self.oracle_truth)
 
         # Cast to PyTorch tensors with strict Data Types matching our network contracts
         return {
@@ -54,5 +57,6 @@ class RolloutBuffer:
             'mask': torch.tensor(np_mask, dtype=torch.bool),
             'action': torch.tensor(np_action, dtype=torch.long),
             'reward': torch.tensor(np_reward, dtype=torch.float32),
-            'is_terminal': torch.tensor(np_is_terminal, dtype=torch.bool)
+            'is_terminal': torch.tensor(np_is_terminal, dtype=torch.bool),
+            'oracle_truth': torch.tensor(np_oracle, dtype=torch.float32)
         }
