@@ -1,5 +1,7 @@
 import os
 
+from evaluate_arena import apply_engine_action
+
 # --- SHATTER NUMPY THREAD LOCKS ---
 # This prevents numpy from spawning massive internal threads inside our multiprocessing workers
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -17,7 +19,7 @@ import numpy as np
 from config import JoeConfig
 from game_context import GameContext
 from fast_engine import JoeEngine
-from agents import HeuristicAgent
+from agents import KeyCardAwareHeuristicAgent as HeuristicAgent
 from buffers import JoeReplayBuffer
 
 
@@ -25,30 +27,18 @@ def _mute_worker_keyboard_interrupt():
     """Forces child processes to ignore Ctrl-C, leaving it to the main thread."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-
-def get_list_index_from_action(player, action_idx):
-    """Translates an absolute neural network logit (6-57) to a relative list index."""
-    target_suit = (action_idx - 6) // 13
-    target_rank = (action_idx - 6) % 13
-
-    for i, card in enumerate(player.hand_list):
-        if int(card.suit) == target_suit and int(card.rank) == target_rank:
-            return i
-
-    raise ValueError(f"CRITICAL: Card (Suit {target_suit}, Rank {target_rank}) not found in hand!")
-
-
-def _worker_generate_game(game_seed):
+def _worker_generate_game(args):
     """
     Top-level worker function. Runs a single, isolated game.
-    Returns a list of dictionaries (RAM buffer) to avoid HDF5 locking crashes.
     """
+    game_seed, num_players = args
     config = JoeConfig()
-    ctx = GameContext(num_players=4, config=config)
+    ctx = GameContext(num_players=num_players, config=config)
     engine = JoeEngine(ctx)
 
-    # We offset the random seed by the game number so each agent in each game is uniquely randomized
-    agents = [HeuristicAgent(random_seed=(game_seed * 4) + i) for i in range(4)]
+    # Offset seed by game number so each agent is uniquely randomized
+    agents = [HeuristicAgent(random_seed=(game_seed * num_players) + i) for i in
+              range(num_players)]
 
     game_data = []
     episode_memory = []
@@ -86,13 +76,11 @@ def _worker_generate_game(game_seed):
             break
 
         if ctx.current_circuit >= config.max_turns:
-            ctx.calculate_scores()
-            flush_memory()
+            episode_memory.clear()
             break
 
         if ctx.total_actions >= config.max_actions:
-            ctx.calculate_scores()
-            flush_memory()
+            episode_memory.clear()
             break
 
         # --- 2. Auto-Stepper for Non-Decision States ---
@@ -133,22 +121,7 @@ def _worker_generate_game(game_seed):
             })
 
             # Execute Action
-            if state_id == 'pickup_decision':
-                engine.resolve_pickup(action_idx)
-            elif state_id == 'may_i_decision':
-                engine.resolve_may_i(action_idx)
-            elif state_id == 'go_down_decision':
-                engine.resolve_go_down(action_idx)
-            elif state_id == 'table_play_phase':
-                if action_idx == 5:
-                    engine.end_table_play()
-                else:
-                    list_idx = get_list_index_from_action(ctx.players[current_player_idx],
-                                                          action_idx)
-                    engine.perform_table_play(list_idx)
-            elif state_id == 'discard_phase':
-                list_idx = get_list_index_from_action(ctx.players[current_player_idx], action_idx)
-                engine.perform_discard(list_idx)
+            apply_engine_action(engine, ctx, state_id, current_player_idx, action_idx)
 
     # Return the entire game's tensor footprint to the main thread
     return game_data
@@ -168,7 +141,7 @@ def generate_data(num_games=1000, max_size=500000, output_file="joe_phase1_sandb
     start_time = time.time()
 
     # The iterable just passes a unique game seed ID to each worker
-    iterable = range(num_games)
+    iterable = [(i, 3) for i in range(num_games)]
 
     with multiprocessing.Pool(processes=num_cores,
                               initializer=_mute_worker_keyboard_interrupt) as pool:
@@ -216,5 +189,4 @@ def generate_data(num_games=1000, max_size=500000, output_file="joe_phase1_sandb
 
 
 if __name__ == "__main__":
-    # Feel free to crank this up to 5,000 or 10,000 for the actual pre-training dataset!
-    generate_data(num_games=10000)
+    generate_data(num_games=20000, max_size=20000000)

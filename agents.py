@@ -376,6 +376,29 @@ class KeyCardAwareHeuristicAgent(HeuristicAgent):
             # If not a Key Card hoarding scenario, fall through to standard pickup logic
             # (which handles completing objectives and picking up partials).
 
+        # --- PHASE: MAY-I DECISION (Strategic Capacity Expansion) ---
+        elif state_id == 'may_i_decision':
+            discard_top = ctx.discard_pile[-1] if ctx.discard_pile else None
+
+            if discard_top and action_mask[2]:
+                player = ctx.players[player_idx]
+
+                # 1. Legacy Behavior: Does it instantly advance a meld progress?
+                if self._completes_objective(discard_top, player_idx, ctx):
+                    return 2  # MAY_I
+
+                # 2. THE FIX: Hand Expansion for Late Rounds
+                # In Rounds 4-7 (index 3+), objectives require 10-12 cards.
+                # If we haven't May-I'd yet (hand size is still baseline 11)...
+                if ctx.current_round_idx >= 3 and len(player.hand_list) <= 11:
+                    # Use our Pulse Check! If it's a valuable sequence piece, take the penalty!
+                    if self._is_useful_pickup(discard_top, player_idx, ctx):
+                        return 2  # MAY_I
+
+            # Otherwise, decline
+            if action_mask[3]:
+                return 3
+
         # --- PHASE: GO DOWN DECISION ---
         elif state_id == 'go_down_decision':
             if action_mask[4] and ctx.check_hand_objective(player_idx):
@@ -395,6 +418,7 @@ class KeyCardAwareHeuristicAgent(HeuristicAgent):
         elif state_id == 'discard_phase':
             player = ctx.players[player_idx]
             hand = player.hand_list
+            is_down = getattr(player, 'is_down', False)
             req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
             base_progress = self._get_objective_progress(player.private_hand, req_sets,
                                                          req_runs, ctx)
@@ -404,7 +428,7 @@ class KeyCardAwareHeuristicAgent(HeuristicAgent):
 
             # --- THE FIX: Detect Gridlock ---
             # If we've been circling the drain for 15 turns, panic.
-            is_stuck = ctx.current_circuit > 15
+            is_stuck = ctx.current_circuit > 20
 
             for card in hand:
                 action_idx = self._get_discard_action_idx(card)
@@ -422,7 +446,7 @@ class KeyCardAwareHeuristicAgent(HeuristicAgent):
                     # We boost this from 5000 to 10000.
                     # This guarantees the bot will ALWAYS discard a Key Card (2000 or 4000)
                     # before it ever breaks its own objective (10000+).
-                    if self._breaks_objective(card, player_idx, ctx, base_progress):
+                    if not is_down and self._breaks_objective(card, player_idx, ctx, base_progress):
                         synergy += 10000
 
                     # Penalize high point values to encourage dumping high cards
@@ -441,25 +465,26 @@ class KeyCardAwareHeuristicAgent(HeuristicAgent):
 
     def _calculate_synergy_smart(self, target_card, hand_list, ctx, player_idx):
         """Refined synergy that dynamically evaluates outstanding needs."""
-        # 1. Playable on table (Key Card)
-        if self._is_playable_on_table(target_card, ctx):
-            # --- THE RADAR: Check the downstream player ---
-            num_players = len(ctx.players)
-            next_player = ctx.players[(player_idx + 1) % num_players]
+        player = ctx.players[player_idx]
+        has_objective = ctx.check_hand_objective(player_idx)
+        is_down = getattr(player, 'is_down', False)
 
-            # If the next player is down and has 1 or 2 cards left, this card is RADIOACTIVE.
-            if getattr(next_player, 'is_down', False) and len(next_player.hand_list) <= 2:
-                return 4000
+        # 1. Are we ready to play on the table? (Objective met OR already down)
+        if has_objective or is_down:
+            # ONLY hoard Key Cards if we are actually in a position to use them
+            if self._is_playable_on_table(target_card, ctx):
+                num_players = len(ctx.players)
+                next_player = ctx.players[(player_idx + 1) % num_players]
 
-                # Otherwise, it's just a highly valuable defensive hold.
-            return 2000
+                # If the next player is down and has 1 or 2 cards left, this card is RADIOACTIVE.
+                if getattr(next_player, 'is_down', False) and len(next_player.hand_list) <= 2:
+                    return 4000
+                return 2000  # Standard Key Card
 
-        # 2. Objective already completely met -> Stop hoarding
-        if ctx.check_hand_objective(player_idx):
+            # If it's NOT a key card, and we have our objective/are down, it's garbage
             return 0
 
-        # 3. --- THE FIX: Outstanding-Aware Pulse Check ---
-        player = ctx.players[player_idx]
+            # 2. --- Outstanding-Aware Pulse Check (Pre-Objective) ---
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
         # What do we actually still need?
@@ -469,10 +494,15 @@ class KeyCardAwareHeuristicAgent(HeuristicAgent):
         needs_sets = (req_sets > 0) and not has_sets
         needs_runs = (req_runs > 0) and not has_runs
 
+        # --- Object-Identity Safe Duplicate Purge ---
         if needs_runs and not needs_sets:
-            for other in hand_list:
-                if other is not target_card and other.suit == target_card.suit and other.rank == target_card.rank:
-                    return -500  # Extreme penalty to guarantee it gets discarded immediately
+            # Count how many of this exact logical card exist in the hand
+            duplicate_count = sum(
+                1 for c in hand_list if c.suit == target_card.suit and c.rank == target_card.rank)
+
+            # If there's more than one, both copies become toxic deadwood
+            if duplicate_count > 1:
+                return -500
 
         synergy = 0
 

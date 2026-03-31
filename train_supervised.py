@@ -1,55 +1,57 @@
 import h5py
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset
+from torch.utils.data import Dataset
+from torch.utils.tensorboard import SummaryWriter
 
 
-def load_buffer_to_ram(filepath: str) -> TensorDataset:
-    """
-    Loads the entire HDF5 Replay Buffer into RAM and casts it to
-    GPU-ready PyTorch Tensors to eliminate Disk I/O bottlenecks.
-    """
-    with h5py.File(filepath, 'r') as f:
-        size = f['current_size'][()]
+class JoeHDF5Dataset(Dataset):
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.file = None  # Delay opening to prevent multiprocessing lock issues
 
-        # Read the entire active buffer block directly into RAM
-        np_spatial = f['spatial'][:size]
-        np_scalar = f['scalar'][:size]
-        np_mask = f['action_mask'][:size]
-        np_oracle = f['oracle_truth'][:size]
-        np_score = f['terminal_score'][:size]
-        np_policy = f['policy'][:size]
+    def __len__(self):
+        # Open briefly just to get the total number of recorded steps
+        with h5py.File(self.filepath, 'r') as f:
+            return f['current_size'][()]
 
-    # Cast to PyTorch tensors
-    # CNNs require float32 inputs, so we cast the int8 spatial tensor here
-    t_spatial = torch.tensor(np_spatial, dtype=torch.float32)
-    # We must scale the presence channels by 2.0 to match the live Arena preprocessing
-    presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    t_spatial[:, presence_channels, :, :] /= 2.0
-    t_scalar = torch.tensor(np_scalar, dtype=torch.float32)
-    t_mask = torch.tensor(np_mask, dtype=torch.bool)
+    def __getitem__(self, idx):
+        # Open the file on the first fetch
+        if self.file is None:
+            self.file = h5py.File(self.filepath, 'r')
 
-    # BCE Loss strictly requires targets between 0.0 and 1.0.
-    # Because players can hold duplicates (value = 2), we clamp it to a binary presence mask.
-    t_oracle = torch.tensor(np_oracle, dtype=torch.float32).clamp(min=0.0, max=1.0)
-    t_score = torch.tensor(np_score, dtype=torch.float32)
+        # 1. Read ONLY the specific row from the hard drive
+        np_spatial = self.file['spatial'][idx]
+        np_scalar = self.file['scalar'][idx]
+        np_mask = self.file['action_mask'][idx]
+        np_oracle = self.file['oracle_truth'][idx]
+        np_score = self.file['terminal_score'][idx]
+        np_policy = self.file['policy'][idx]
 
-    # CrossEntropyLoss ALSO strictly requires soft targets to be between 0.0 and 1.0.
-    # We clamp to erase any float32 precision drift (e.g., 1.0000001) from Phase 1.
-    t_policy = torch.tensor(np_policy, dtype=torch.float32).clamp(min=0.0, max=1.0)
-    t_policy = t_policy / (t_policy.sum(dim=-1, keepdim=True) + 1e-8)
+        # 2. Apply preprocessing on the fly
+        t_spatial = torch.tensor(np_spatial, dtype=torch.float32)
+        presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        t_spatial[presence_channels, :, :] /= 2.0
 
-    return TensorDataset(t_spatial, t_scalar, t_mask, t_oracle, t_score, t_policy)
+        t_scalar = torch.tensor(np_scalar, dtype=torch.float32)
+        t_mask = torch.tensor(np_mask, dtype=torch.bool)
+        t_oracle = torch.tensor(np_oracle, dtype=torch.float32).clamp(min=0.0, max=1.0)
+        t_score = torch.tensor(np_score, dtype=torch.float32)
+
+        t_policy = torch.tensor(np_policy, dtype=torch.float32).clamp(min=0.0, max=1.0)
+        t_policy = t_policy / (t_policy.sum(dim=-1, keepdim=True) + 1e-8)
+
+        return t_spatial, t_scalar, t_mask, t_oracle, t_score, t_policy
 
 
-def train_supervised_epoch(model, dataloader, optimizer, device):
+def train_supervised_epoch(model, dataloader, optimizer, device, actor_weights=None):
     """
     Executes one epoch of Behavioral Cloning across all three network heads simultaneously.
     """
     model.train()
 
     # Define the composite loss functions
-    actor_criterion = nn.CrossEntropyLoss()
+    actor_criterion = nn.CrossEntropyLoss(weight=actor_weights)
     critic_criterion = nn.MSELoss()
     oracle_criterion = nn.BCELoss()
 
@@ -108,7 +110,7 @@ if __name__ == "__main__":
     # 1. Configuration
     data_path = "joe_phase1_sandbox.h5"
     save_path = "models/joenet_phase2_cloned.pth"
-    batch_size = 512
+    batch_size = 4096
     epochs = 10
     learning_rate = 1e-3
 
@@ -122,23 +124,51 @@ if __name__ == "__main__":
     print(f"Device: {device}")
 
     # 3. Load Data
-    print(f"Loading HDF5 buffer into RAM...")
-    dataset = load_buffer_to_ram(data_path)
+    print(f"Connecting to HDF5 buffer (Lazy Loading)...")
+    dataset = JoeHDF5Dataset(data_path)
+    # Important: Leave num_workers=0 (default) when streaming from HDF5 to avoid thread locking
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    print(f"Dataset Loaded: {len(dataset)} total steps.")
+    print(f"Dataset Connected: {len(dataset)} total steps.")
+
+    print("Calculating dynamic class weights (Chunked to save RAM)...")
+    class_counts = torch.zeros(58, dtype=torch.float64)
+
+    with h5py.File(data_path, 'r') as f:
+        size = f['current_size'][()]
+        chunk_size = 500000
+        for i in range(0, size, chunk_size):
+            end = min(i + chunk_size, size)
+            # Load just one chunk of the policy array at a time
+            policy_chunk = torch.tensor(f['policy'][i:end], dtype=torch.float32)
+            class_counts += policy_chunk.sum(dim=0).double()
+
+    total_actions = class_counts.sum()
+    actor_weights = total_actions / (58.0 * (class_counts + 1.0))
+    actor_weights = torch.clamp(actor_weights, max=10.0).to(device).float()
 
     # 4. Initialize Model & Optimizer
     model = JoeNet().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
+    # Initialize TensorBoard Writer for Phase 2
+    writer = SummaryWriter(log_dir="runs/joenet_phase2_supervised")
+
     # 5. Training Loop
     for epoch in range(epochs):
-        metrics = train_supervised_epoch(model, dataloader, optimizer, device)
+        metrics = train_supervised_epoch(model, dataloader, optimizer, device, actor_weights)
 
         print(f"Epoch {epoch + 1}/{epochs} | "
               f"Actor Loss: {metrics['actor_loss']:.4f} | "
               f"Critic Loss: {metrics['critic_loss']:.4f} | "
               f"Oracle Loss: {metrics['oracle_loss']:.4f}")
+
+        # --- TENSORBOARD BROADCAST ---
+        writer.add_scalar('Loss/Actor', metrics['actor_loss'], epoch + 1)
+        writer.add_scalar('Loss/Critic', metrics['critic_loss'], epoch + 1)
+        writer.add_scalar('Loss/Oracle', metrics['oracle_loss'], epoch + 1)
+        writer.add_scalar('Loss/Total', metrics['total_loss'], epoch + 1)
+
+    writer.close()
 
     # 6. Save the final weights
     torch.save(model.state_dict(), save_path)
