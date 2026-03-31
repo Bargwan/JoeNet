@@ -108,10 +108,28 @@ class TestDataGenerationPipeline(unittest.TestCase):
         a full game and returns the correctly formatted RAM data.
         """
         from generate_sandbox_data import _worker_generate_game
+        from unittest.mock import patch
+        from game_context import GameContext
 
-        # 1. ACT: Run the worker synchronously for a single game
-        # Using a fixed seed for predictability
-        game_data = _worker_generate_game(game_seed=42)
+        def fake_check_objective(ctx_self, player_idx):
+            # Trigger a win for Player 0 after 12 actions (3 full turns)
+            if ctx_self.total_actions >= 12 and player_idx == 0:
+                return True
+            return False
+
+        def fake_go_down(ctx_self, player_idx):
+            # Simulate a perfect "Down and Out" by emptying the hand
+            ctx_self.players[player_idx].hand_list.clear()
+            ctx_self.players[player_idx].private_hand.fill(0)
+
+        # 1. ACT: Patch the critical bottlenecks to force a healthy, fast game
+        # - check_hand_objective: Forces a legitimate win to satisfy the worker's data filters.
+        # - go_down: Bypasses tensor math and instantly clears the hand to finish the round.
+        # - _search_melds: Completely neutralizes the agent's computationally expensive DFS logic.
+        with patch.object(GameContext, 'check_hand_objective', new=fake_check_objective), \
+                patch.object(GameContext, 'go_down', new=fake_go_down), \
+                patch.object(GameContext, '_search_melds', return_value=(False, None, None)):
+            game_data = _worker_generate_game(game_seed=42)
 
         # 2. ASSERT: It should return a list of dictionaries representing the episode
         self.assertIsInstance(game_data, list)

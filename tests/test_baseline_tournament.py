@@ -37,7 +37,7 @@ class TestBaselineTournament(unittest.TestCase):
                          "TournamentConfig must be initialized with exactly 4 agents.")
 
         # Verify the simulation was actually triggered
-        mock_runner_instance.simulate.assert_called_once()
+        mock_runner_instance.simulate_parallel.assert_called_once()
 
 
 if __name__ == '__main__':

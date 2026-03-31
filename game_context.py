@@ -366,24 +366,34 @@ class GameContext:
 
     def _can_extend_run(self, suit, rank):
         """
-        Checks if a specific suit/rank coordinate is adjacent to an existing run
-        on the table.
+        Checks if a specific suit/rank coordinate is adjacent to an existing run.
+        Strictly prevents King/Two wrap-around by checking for Ghost Aces.
         """
-        # Standard Case: Check ranks below and above (ranks 1 through 11)
-        if 0 < rank < 12:
-            if self.table_runs[suit, rank - 1] > 0 or self.table_runs[suit, rank + 1] > 0:
-                return True
+        # Rank 1 (Two)
+        if rank == 1:
+            if self.table_runs[suit, 2] > 0: return True
+            # Can connect to Ace Low ONLY if King is not present
+            if self.table_runs[suit, 0] > 0 and self.table_runs[suit, 12] == 0: return True
+            return False
 
-        # Special Case: Ace-Low (Rank 0)
-        # Connects to Two (Rank 1) or King (Rank 12) via the mirrored High Ace logic
-        if rank == 0:
-            if self.table_runs[suit, 1] > 0 or self.table_runs[suit, 12] > 0:
-                return True
-
-        # Special Case: King (Rank 12)
-        # Connects to Queen (Rank 11) or Ace (Rank 0 or 13)
+        # Rank 12 (King)
         if rank == 12:
-            if self.table_runs[suit, 11] > 0 or self.table_runs[suit, 0] > 0:
+            if self.table_runs[suit, 11] > 0: return True
+            # Can connect to Ace High ONLY if Two is not present
+            if self.table_runs[suit, 13] > 0 and self.table_runs[suit, 1] == 0: return True
+            return False
+
+        # Rank 0 or 13 (Ace)
+        if rank == 0 or rank == 13:
+            # Can connect to Two ONLY if King is not present
+            if self.table_runs[suit, 1] > 0 and self.table_runs[suit, 12] == 0: return True
+            # Can connect to King ONLY if Two is not present
+            if self.table_runs[suit, 12] > 0 and self.table_runs[suit, 1] == 0: return True
+            return False
+
+        # Standard Case: 3 through Queen (Ranks 2 to 11)
+        if 1 < rank < 12:
+            if self.table_runs[suit, rank - 1] > 0 or self.table_runs[suit, rank + 1] > 0:
                 return True
 
         return False
@@ -411,30 +421,28 @@ class GameContext:
         )
 
     def execute_table_play(self, player_idx: int, card_index: int):
-        """
-        Moves a specific card from the player's hand to the table melds.
-        """
         player = self.players[player_idx]
-
-        # 1. Pop the specific card out of the hand list
         card_to_play = player.hand_list.pop(card_index)
 
-        # 2. Re-sync the 4x14 private_hand tensor
+        # Re-sync private hand
         player.private_hand.fill(0)
         for c in player.hand_list:
             suit, rank = int(c.suit), int(c.rank)
             player.private_hand[suit, rank] += 1
-            if rank == 0:  # Handle Ace duplication
+            if rank == 0:
                 player.private_hand[suit, 13] += 1
 
-        # 3. Add the card to the public table tensors.
-        # Note: We are bypassing strict set/run verification here and
-        # placing it in table_sets to satisfy the physics test.
-        # Strict validation will be handled by the Action Mask wrapper later.
         suit, rank = int(card_to_play.suit), int(card_to_play.rank)
-        self.table_sets[suit, rank] += 1
-        if rank == 0:
-            self.table_sets[suit, 13] += 1
+
+        # Route to the correct public tensor
+        if np.any(self.table_sets[:, rank] > 0):
+            self.table_sets[suit, rank] += 1
+            if rank == 0:
+                self.table_sets[suit, 13] += 1
+        elif self._can_extend_run(suit, rank):
+            self.table_runs[suit, rank] += 1
+            if rank == 0:
+                self.table_runs[suit, 13] += 1
 
     def start_may_i_checks(self):
         """Initializes the May-I loop to the first downstream player."""
@@ -640,6 +648,7 @@ class GameContext:
         4: Go_Down, 5: Wait / End_Table_Play
         6-57: Card identifiers (Discard or Play)
         """
+        state_id = state_id.lower().replace(' ', '_').replace('-', '_')
         mask = np.zeros(58, dtype=bool)
         player = self.players[player_idx]
 
@@ -664,12 +673,15 @@ class GameContext:
                 card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
                 mask[card_idx] = True
 
+
         elif state_id == 'table_play_phase':
             mask[5] = True  # End Table Play
-            # Cards in hand are legal to attempt to play on the table
+            # Cards in hand are ONLY legal if they actually fit an existing meld
             for card in player.hand_list:
-                card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
-                mask[card_idx] = True
+                suit, rank = int(card.suit), int(card.rank)
+                if np.any(self.table_sets[:, rank] > 0) or self._can_extend_run(suit, rank):
+                    card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
+                    mask[card_idx] = True
 
         else:
             # We strictly enforce known states to prevent silent tensor failures

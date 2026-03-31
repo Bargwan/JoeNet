@@ -38,7 +38,7 @@ class TestJoeEngine(unittest.TestCase):
         from cards import Card, Rank, Suit
 
         # 1. Verify initial state
-        self.assertEqual(self.engine.current_state.id, "setup")
+        self.assertEqual(self.engine.state_id, "setup")
 
         # 2. Trigger flow down to the start of the turn
         self.engine.start_game()
@@ -56,7 +56,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 5. ASSERT: Should now land on discard_phase every time
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "discard_phase",
             "Engine should land on discard_phase with a weak hand."
         )
@@ -81,7 +81,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.discard_phase
 
         # Verify teleportation worked before acting
-        self.assertEqual(self.engine.current_state.id, "discard_phase")
+        self.assertEqual(self.engine.state_id, "discard_phase")
         self.assertEqual(len(self.ctx.active_player.hand_list), 2)
 
         # 3. ACT: Fire the transition
@@ -90,7 +90,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing and Rotation
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "start_turn",
             "Engine should route to start_turn because the hand wasn't empty"
         )
@@ -123,13 +123,13 @@ class TestJoeEngine(unittest.TestCase):
 
         # 2. Teleport the Logic Layer
         self.engine.current_state = self.engine.pickup_decision
-        self.assertEqual(self.engine.current_state.id, "pickup_decision")
+        self.assertEqual(self.engine.state_id, "pickup_decision")
 
         # 3. ACT: Fire the transition
         self.engine.resolve_pickup(1)
 
         # 4. ASSERT: State Routing
-        self.assertEqual(self.engine.current_state.id, "discard_phase")
+        self.assertEqual(self.engine.state_id, "discard_phase")
 
         # 5. ASSERT: Data Movement
         self.assertEqual(len(self.ctx.discard_pile), 0)
@@ -161,7 +161,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.resolve_pickup(0)
 
         # 4. ASSERT: State Routing
-        self.assertEqual(self.engine.current_state.id, "may_i_decision")
+        self.assertEqual(self.engine.state_id, "may_i_decision")
 
         # 5. ASSERT: Data Movement
         self.assertEqual(len(self.ctx.deck), initial_deck_size - 1)
@@ -203,7 +203,7 @@ class TestJoeEngine(unittest.TestCase):
         # The engine should pass through the automatic 'may_i_check' state,
         # skip Player 1, and pause on a new waiting state for Player 2.
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "may_i_decision",
             "Engine should pause on 'may_i_decision' for an eligible interrupter"
         )
@@ -246,7 +246,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.resolve_may_i(2)
 
         # 4. ASSERT: State Routing
-        self.assertEqual(self.engine.current_state.id, "discard_phase")
+        self.assertEqual(self.engine.state_id, "discard_phase")
 
         # 5. ASSERT: Data Movement
         self.assertEqual(len(self.ctx.discard_pile), 0)
@@ -292,7 +292,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "go_down_decision",
             "Engine should route to 'go_down_decision' when the hand meets the round "
             "objective."
@@ -332,7 +332,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "discard_phase",
             "Engine should route straight to 'discard_phase' when the hand is invalid."
         )
@@ -371,12 +371,12 @@ class TestJoeEngine(unittest.TestCase):
         # Currently, your engine does not automatically trigger commit_melds()
         # when entering the 'going_down' state. We manually fire it here to
         # continue the chain, but this highlights a missing automation link.
-        if self.engine.current_state.id == "going_down":
+        if self.engine.state_id == "going_down":
             self.engine.commit_melds()
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "table_play_phase",  # <-- UPDATED
             "Engine should route to table_play_phase after placing melds, waiting for agent."
         )
@@ -470,7 +470,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "table_play_phase",  # <-- UPDATED
             "Engine should skip 'go_down_decision' and land on 'table_play_phase' "
             "if player is already down."
@@ -548,7 +548,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT
         # Instead of 'dealing', it lands on 'game_over' due to the tournament limit.
-        self.assertEqual(self.engine.current_state.id, "game_over")
+        self.assertEqual(self.engine.state_id, "game_over")
 
         # --- INTEGRITY CHECK: Verify card successfully transitioned to dead_cards tensor
         # / discard_pile ---
@@ -570,7 +570,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "dealing",
             "Engine should loop back to 'dealing' for Rounds 0-6."
         )
@@ -592,7 +592,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "game_over",
             "Engine should transition to 'game_over' when the tournament limit is reached."
         )
@@ -697,7 +697,7 @@ class TestJoeEngine(unittest.TestCase):
         # The engine should loop back to may_i_check, automatically evaluate
         # Player 2, and pause on may_i_decision again.
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "may_i_decision",
             "Engine should loop back and pause on the next eligible player."
         )
@@ -738,7 +738,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. ASSERT: State Routing
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "discard_phase",
             "Engine should bypass placement and route straight to discard_phase."
         )
@@ -815,12 +815,12 @@ class TestJoeEngine(unittest.TestCase):
         # 3. ACT: Cascade through the round boundary
         # Manually fire the entry hook since we teleported into the state
         self.engine.on_enter_round_end()
-        self.assertEqual(self.engine.current_state.id, "dealing")
+        self.assertEqual(self.engine.state_id, "dealing")
 
         self.engine.deal_cards()  # Routes to 'start_turn', triggering the rotation
 
         # The engine pauses on start_turn. It does not auto-forward!
-        self.assertEqual(self.engine.current_state.id, "start_turn")
+        self.assertEqual(self.engine.state_id, "start_turn")
 
         # 4. ASSERT: Dealer should be 1, Active Player should be 2
         self.assertEqual(
@@ -860,14 +860,14 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.resolve_pickup(0)
 
         # Engine should ask Player 2 first (Active + 1).
-        self.assertEqual(self.engine.current_state.id, "may_i_decision")
+        self.assertEqual(self.engine.state_id, "may_i_decision")
         self.assertEqual(self.ctx.may_i_target_idx, 2)
 
         # Player 2 passes.
         self.engine.resolve_may_i(3)
 
         # Engine should ask Player 3 next.
-        self.assertEqual(self.engine.current_state.id, "may_i_decision")
+        self.assertEqual(self.engine.state_id, "may_i_decision")
         self.assertEqual(self.ctx.may_i_target_idx, 3)
 
         # 4. ACT: Player 3 passes.
@@ -882,7 +882,7 @@ class TestJoeEngine(unittest.TestCase):
         # Note: Control returns via 'processing_pickup', which immediately evaluates
         # Player 1's hand. Because Player 1 has a weak hand, it auto-routes to 'discard_phase'.
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "discard_phase",
             "Engine should skip the discarder and return control to the active player's "
             "discard phase."
@@ -901,6 +901,8 @@ class TestJoeEngine(unittest.TestCase):
         target_card = Card(Suit.HEARTS, Rank.SEVEN, deck_index=0)
         player.receive_cards([target_card])
 
+        self.ctx.table_sets[Suit.SPADES, Rank.SEVEN] = 1
+
         # Teleport to new state (This will immediately fail because the state doesn't exist yet)
         self.engine.current_state = self.engine.table_play_phase
 
@@ -909,7 +911,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # ASSERT: State should loop back automatically
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "table_play_phase",
             "Engine should loop back to table_play_phase after processing a card."
         )
@@ -936,7 +938,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.end_table_play()
 
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "discard_phase",
             "Should route to discard_phase because hand is not empty."
         )
@@ -950,7 +952,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # Note: round_end automatically routes to dealing for Round 0
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "dealing",
             "Should route to round_end (and cascade to dealing) because hand is empty."
         )
@@ -986,7 +988,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 5. ASSERT: It should continue to the next turn.
         self.assertEqual(
-            self.engine.current_state.id,
+            self.engine.state_id,
             "start_turn",
             "Engine should route to 'start_turn' because the hand is not empty, even if all players are down."
         )

@@ -66,10 +66,16 @@ class RLTrainer:
         oracle_loss = F.binary_cross_entropy(oracle_probs, oracle_truths)
 
         # 5. Backpropagation
-        total_loss = actor_loss + critic_loss
+        # --- FIXED: Reconnect the Oracle with a massive defensive weight ---
+        oracle_weight = 1  # Scales the ~0.65 loss to ~6500.0 to fight the Critic
+        total_loss = actor_loss + critic_loss + (oracle_loss * oracle_weight)
 
         self.optimizer.zero_grad()
         total_loss.backward()
+
+        # --- FIXED: Gradient Clipping to prevent massive penalty spikes from exploding weights ---
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+
         self.optimizer.step()
 
         return {

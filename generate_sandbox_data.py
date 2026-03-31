@@ -78,7 +78,7 @@ def _worker_generate_game(game_seed):
     engine.start_game()
 
     while True:
-        state_id = engine.current_state.id
+        state_id = engine.state_id
 
         # --- 1. Terminal / Flush States ---
         if state_id == 'game_over':
@@ -217,4 +217,4 @@ def generate_data(num_games=1000, max_size=500000, output_file="joe_phase1_sandb
 
 if __name__ == "__main__":
     # Feel free to crank this up to 5,000 or 10,000 for the actual pre-training dataset!
-    generate_data(num_games=1000)
+    generate_data(num_games=10000)
