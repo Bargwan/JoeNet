@@ -13,7 +13,7 @@ from game_context import GameContext
 from fast_engine import JoeEngine
 from reward import RewardCalculator
 from rl_buffer import RolloutBuffer
-from evaluate_arena import apply_engine_action
+from evaluate_arena import apply_engine_action, _log_stalemate_hands
 from rl_trainer import RLTrainer
 from agents import HeuristicAgent
 
@@ -80,14 +80,19 @@ def run_rl_training(episodes=1000, temperature=1.5):
     print(f"Device: {device}")
 
     model = JoeNet().to(device)
-    weights_path = "models/joenet_phase2_cloned.pth"
+    weights_path = "models/joenet_phase2_ep7.pth"
     if os.path.exists(weights_path):
         model.load_state_dict(torch.load(weights_path, map_location=device))
         print("-> Successfully loaded Phase 2 Behavioral Clone weights.")
     else:
         print("-> WARNING: Phase 2 weights not found. Starting from random initialization!")
 
-    optimizer = Adam(model.parameters(), lr=1e-4)
+    # train_rl.py (Replacement for Line 92)
+    optimizer = Adam([
+        {'params': model.oracle.parameters(), 'lr': 1e-6},  # The Seer's Guard (Micro-LR)
+        {'params': model.actor.parameters(), 'lr': 1e-4},  # Standard Policy LR
+        {'params': model.critic.parameters(), 'lr': 1e-4}  # Standard Value LR
+    ])
     buffer = RolloutBuffer()
     trainer = RLTrainer(model, optimizer, gamma=0.99)
     runner = RLRunner(model, trainer, buffer)
@@ -99,9 +104,12 @@ def run_rl_training(episodes=1000, temperature=1.5):
     for episode in range(1, episodes + 1):
         # Starts at 1.5 (heavy exploration) and smoothly decays to 0.5 (heavy exploitation)
         current_temp = max(0.5, 1.5 - (episode / 800.0))
+        stalemate_occurred = False
+        terminal_reward = 0.0
 
         # --- NEW: Dynamic Player Counts ---
-        num_players = random.choice([3, 4])
+        # num_players = random.choice([3, 4])
+        num_players = 4
         ctx = GameContext(num_players=num_players)
         engine = JoeEngine(ctx)
         engine.start_game()
@@ -125,16 +133,19 @@ def run_rl_training(episodes=1000, temperature=1.5):
                 break
 
             if ctx.current_circuit >= ctx.config.max_turns:
-                ctx.calculate_scores()
-                if ctx.current_round_idx >= 7:
-                    # --- NEW: Calculate and flush the reward before breaking! ---
-                    terminal_reward = -float(ctx.players[0].score)
-                    tracker.flush_terminal(terminal_reward)
-                    break
-                else:
-                    engine.current_state = engine.dealing
-                    engine.on_enter_dealing()
-                    continue
+                # --- Handling stalemates ---
+                # Assign a flat penalty slightly worse than a normal loss
+                stalemate_penalty = -50.0
+                tracker.flush_terminal(stalemate_penalty)
+
+                # Flag it for TensorBoard
+                stalemate_occurred = True
+                terminal_reward = stalemate_penalty
+
+                # Log the hands to see exactly who was hoarding what!
+                _log_stalemate_hands(ctx)
+
+                break
 
             if state_id == 'dealing':
                 engine.deal_cards()
@@ -237,6 +248,10 @@ def run_rl_training(episodes=1000, temperature=1.5):
         # Performance & Health
         writer.add_scalar('Performance/Time_Elapsed_Secs', elapsed, episode)
         writer.add_scalar(f'Reward/Terminal_Score_{num_players}P', terminal_reward, episode)
+
+        writer.add_scalar(f'Health/Stalemates_{num_players}P', 1 if stalemate_occurred else 0,
+                          episode)
+        writer.add_scalar(f'Health/Turns_Per_Round_{num_players}P', ctx.current_circuit, episode)
 
     print("\n--- Phase 3 Training Complete! ---")
     torch.save(model.state_dict(), "models/joenet_phase3_rl_final.pth")

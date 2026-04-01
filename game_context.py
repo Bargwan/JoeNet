@@ -599,7 +599,7 @@ class GameContext:
 
         # 7: Circuit Progress (Strategic Turn Number)
         max_circuits = getattr(self.config, 'max_turns', 15)
-        scalar[7] = min(self.current_circuit / float(max_circuits), 1.0)
+        scalar[7] = min(self.current_circuit / 100.0, 1.0)
 
         # 8: Stock Depth
         scalar[8] = len(self.deck) / 104.0

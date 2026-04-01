@@ -91,17 +91,18 @@ class OracleNet(nn.Module):
         self.spatial_head = SpatialHead(in_channels=13)
         self.scalar_head = ScalarHead(in_features=28)
 
+        # WIDENED FUNNEL: Prevent the 168-output bottleneck
         self.fusion = nn.Sequential(
-            nn.Linear(320, 256),
-            nn.LayerNorm(256),
+            nn.Linear(320, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.LayerNorm(128),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
             nn.ReLU()
         )
 
         # Output exactly 168 features (3 opponents * 4 suits * 14 ranks)
-        self.output_head = nn.Linear(128, 168)
+        self.output_head = nn.Linear(512, 168)
 
     def forward(self, spatial_x: torch.Tensor, scalar_x: torch.Tensor) -> torch.Tensor:
         latent_spatial = self.spatial_head(spatial_x)
@@ -180,9 +181,11 @@ class ActorNet(nn.Module):
             nn.Linear(320, 256),
             nn.LayerNorm(256),
             nn.ReLU(),
+            nn.Dropout(p=0.15),
             nn.Linear(256, 128),
             nn.LayerNorm(128),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(p=0.2) # <--- NEW: Anti-Saturation layer before the final decision
         )
 
         # Outputs the unified 58 action logits

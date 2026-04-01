@@ -67,7 +67,7 @@ class RLTrainer:
 
         # 5. Backpropagation
         # --- FIXED: Reconnect the Oracle with a massive defensive weight ---
-        oracle_weight = 1  # Scales the ~0.65 loss to ~6500.0 to fight the Critic
+        oracle_weight = 1000  # Scales the ~0.65 loss to ~6500.0 to fight the Critic
         total_loss = actor_loss + critic_loss + (oracle_loss * oracle_weight)
 
         self.optimizer.zero_grad()

@@ -72,8 +72,8 @@ if __name__ == "__main__":
     device = torch.device("cpu")  # Exporting is usually safest on CPU
     model = JoeNet().to(device)
 
-    weights_path = "models/joenet_phase3_rl_final.pth"
-    onnx_path = "models/joenet_phase3.onnx"
+    weights_path = "models/joenet_phase2_ep7.pth"
+    onnx_path = "models/joenet_phase7.onnx"
 
     if os.path.exists(weights_path):
         model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
