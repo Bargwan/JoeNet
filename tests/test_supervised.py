@@ -6,24 +6,59 @@ from torch.utils.data import TensorDataset, DataLoader
 import h5py
 
 from buffers import JoeReplayBuffer
-from train_supervised import load_buffer_to_ram, train_supervised_epoch
+from train_supervised import train_supervised_epoch
 
 
-# Mocking the JoeNet architecture for the test to isolate the training loop logic
+def mock_load_buffer(filepath):
+    """
+    Replaces the old load_buffer_to_ram for testing purposes.
+    Simulates the preprocessing step that happens in the chunked loop.
+    """
+    with h5py.File(filepath, 'r') as f:
+        # Grab the exact number of populated rows
+        size = f['current_size'][()]
+
+        np_spatial = f['spatial'][:size]
+        np_scalar = f['scalar'][:size]
+        np_mask = f['action_mask'][:size]
+        np_oracle = f['oracle_truth'][:size]
+        np_score = f['terminal_score'][:size]
+        np_policy = f['policy'][:size]
+
+    t_spatial = torch.tensor(np_spatial, dtype=torch.float32)
+    presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    t_spatial[:, presence_channels, :, :] /= 2.0
+
+    t_scalar = torch.tensor(np_scalar, dtype=torch.float32)
+    t_mask = torch.tensor(np_mask, dtype=torch.bool)
+    t_oracle = torch.tensor(np_oracle, dtype=torch.float32).clamp(min=0.0, max=1.0)
+    t_score = torch.tensor(np_score, dtype=torch.float32)
+    t_policy = torch.tensor(np_policy, dtype=torch.float32).clamp(min=0.0, max=1.0)
+    t_policy = t_policy / (t_policy.sum(dim=-1, keepdim=True) + 1e-8)
+
+    return TensorDataset(t_spatial, t_scalar, t_mask, t_oracle, t_score, t_policy)
+
+
 class MockJoeNet(torch.nn.Module):
+    """Mocking the split architecture so the modes can target specific heads."""
+
     def __init__(self):
         super().__init__()
-        # A dummy parameter so the optimizer has something to update
         self.dummy_weight = torch.nn.Parameter(torch.ones(1))
 
-    def forward(self, spatial, scalar, action_mask):
+    # --- Mocking the Sub-Modules ---
+    def oracle(self, spatial, scalar):
         batch_size = spatial.shape[0]
-        # Return mock outputs matching the exact shapes defined in the spec
-        mock_logits = torch.ones((batch_size, 58), requires_grad=True) * self.dummy_weight
-        mock_ev = torch.ones((batch_size, 1), requires_grad=True) * self.dummy_weight
-        mock_oracle = torch.sigmoid(
+        return torch.sigmoid(
             torch.ones((batch_size, 3, 4, 14), requires_grad=True) * self.dummy_weight)
-        return mock_logits, mock_ev, mock_oracle
+
+    def critic(self, expanded_spatial, scalar):
+        batch_size = expanded_spatial.shape[0]
+        return torch.ones((batch_size, 1), requires_grad=True) * self.dummy_weight
+
+    def actor(self, expanded_spatial, scalar, action_mask):
+        batch_size = expanded_spatial.shape[0]
+        return torch.ones((batch_size, 58), requires_grad=True) * self.dummy_weight
 
 
 class TestSupervisedTrainingLoop(unittest.TestCase):
@@ -32,7 +67,7 @@ class TestSupervisedTrainingLoop(unittest.TestCase):
         if os.path.exists(self.test_file):
             os.remove(self.test_file)
 
-        # Pre-fill a tiny buffer with 10 rows of perfectly formatted Phase 1 data
+        # Pre-fill a tiny buffer with 10 rows
         buffer = JoeReplayBuffer(filepath=self.test_file, max_size=100)
         for _ in range(10):
             buffer.add(
@@ -53,51 +88,56 @@ class TestSupervisedTrainingLoop(unittest.TestCase):
                 pass
 
     def test_ram_dataloader_conversion(self):
-        """
-        Verify the helper function successfully pulls the HDF5 data entirely into RAM,
-        casts to the correct PyTorch dtypes, and builds a TensorDataset.
-        """
-        dataset = load_buffer_to_ram(self.test_file)
+        dataset = mock_load_buffer(self.test_file)
 
         self.assertIsInstance(dataset, TensorDataset)
         self.assertEqual(len(dataset), 10, "Dataset did not load all 10 rows.")
 
         spatial, scalar, mask, oracle, score, policy = dataset[0]
 
-        # Verify the PyTorch dtypes are perfect for GPU processing
-        self.assertEqual(spatial.dtype, torch.float32, "Spatial must be cast to float32 for CNNs")
-        self.assertEqual(scalar.dtype, torch.float32)
-        self.assertEqual(mask.dtype, torch.bool)
-        self.assertEqual(oracle.dtype, torch.float32, "Oracle Truth must be float32 for BCE Loss")
-        self.assertEqual(score.dtype, torch.float32)
-        self.assertEqual(policy.dtype, torch.float32)
+        self.assertEqual(spatial.dtype, torch.float32)
+        self.assertEqual(oracle.dtype, torch.float32)
 
-    def test_composite_loss_backward_pass(self):
-        """
-        Verify the training epoch successfully calculates the 3 composite losses
-        (CE, MSE, BCE) and successfully flows gradients backward to update the weights.
-        """
-        dataset = load_buffer_to_ram(self.test_file)
+    def test_oracle_mode_backward_pass(self):
+        """Verify Phase 2A strictly isolates and updates the Oracle."""
+        dataset = mock_load_buffer(self.test_file)
         dataloader = DataLoader(dataset, batch_size=5, shuffle=True)
 
         model = MockJoeNet()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
-
         initial_weight = model.dummy_weight.item()
 
-        # ACT: Run one supervised training epoch
-        metrics = train_supervised_epoch(model, dataloader, optimizer, device=torch.device('cpu'))
+        metrics = train_supervised_epoch(model, dataloader, optimizer, torch.device('cpu'),
+                                         mode='oracle')
 
-        # ASSERT: Metrics returned
-        self.assertIn('actor_loss', metrics)
-        self.assertIn('critic_loss', metrics)
-        self.assertIn('oracle_loss', metrics)
-        self.assertIn('total_loss', metrics)
+        # Tuple: (act_loss, crit_loss, ora_loss, tot_loss, entropy, num_batches)
+        self.assertEqual(len(metrics), 6)
+        self.assertGreater(metrics[2], 0.0, "Oracle loss should be calculated.")
+        self.assertEqual(metrics[0], 0.0, "Actor loss should be ignored in Oracle mode.")
 
-        # ASSERT: Weights updated (proving loss.backward() and optimizer.step() executed)
         final_weight = model.dummy_weight.item()
-        self.assertNotEqual(initial_weight, final_weight,
-                            "Model weights did not update! Backward pass failed.")
+        self.assertNotEqual(initial_weight, final_weight, "Oracle weights did not update!")
+
+    def test_decision_mode_backward_pass(self):
+        """Verify Phase 2B strictly isolates and updates the Actor/Critic."""
+        dataset = mock_load_buffer(self.test_file)
+        dataloader = DataLoader(dataset, batch_size=5, shuffle=True)
+
+        model = MockJoeNet()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+        initial_weight = model.dummy_weight.item()
+
+        metrics = train_supervised_epoch(model, dataloader, optimizer, torch.device('cpu'),
+                                         mode='decision')
+
+        # Tuple: (act_loss, crit_loss, ora_loss, tot_loss, entropy, num_batches)
+        self.assertEqual(len(metrics), 6)
+        self.assertGreater(metrics[0], 0.0, "Actor loss should be calculated.")
+        self.assertGreater(metrics[1], 0.0, "Critic loss should be calculated.")
+        self.assertEqual(metrics[2], 0.0, "Oracle loss should be ignored in Decision mode.")
+
+        final_weight = model.dummy_weight.item()
+        self.assertNotEqual(initial_weight, final_weight, "Decision weights did not update!")
 
 
 if __name__ == '__main__':

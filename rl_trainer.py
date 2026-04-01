@@ -14,7 +14,8 @@ class RLTrainer:
         self.optimizer = optimizer
         self.gamma = gamma
 
-    def update(self, batch_tensors: dict, next_value: torch.Tensor) -> dict:
+    def update(self, batch_tensors: dict, next_value: torch.Tensor,
+               oracle_weight: float = 0.0) -> dict:
         """
         Computes the losses and updates the network weights.
         """
@@ -23,6 +24,8 @@ class RLTrainer:
 
         # Extract and immediately push all tensors to the correct device
         spatial = batch_tensors['spatial'].to(device)
+        presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        spatial[:, presence_channels, :, :] /= 2.0
         scalar = batch_tensors['scalar'].to(device)
         mask = batch_tensors['mask'].to(device)
         actions = batch_tensors['action'].to(device)
@@ -63,19 +66,16 @@ class RLTrainer:
 
         # Policy Gradient formula: Maximize expected reward -> Minimize -log(P(a|s)) * Advantage
         actor_loss = -(action_log_probs * advantages).mean()
+        assert oracle_probs.shape == oracle_truths.shape, f"Payload Mismatch! Probs: {oracle_probs.shape} vs Truths: {oracle_truths.shape}"
         oracle_loss = F.binary_cross_entropy(oracle_probs, oracle_truths)
 
         # 5. Backpropagation
-        # --- FIXED: Reconnect the Oracle with a massive defensive weight ---
-        oracle_weight = 1000  # Scales the ~0.65 loss to ~6500.0 to fight the Critic
+        # --- FIXED: Dynamic Oracle Weighting ---
         total_loss = actor_loss + critic_loss + (oracle_loss * oracle_weight)
 
         self.optimizer.zero_grad()
         total_loss.backward()
-
-        # --- FIXED: Gradient Clipping to prevent massive penalty spikes from exploding weights ---
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
-
         self.optimizer.step()
 
         return {

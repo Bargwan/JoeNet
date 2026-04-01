@@ -30,12 +30,12 @@ class RLRunner:
         self.trainer = trainer
         self.buffer = buffer
 
-    def trigger_update(self, next_value: torch.Tensor):
+    def trigger_update(self, next_value: torch.Tensor, oracle_weight: float = 0.0):
         if len(self.buffer) == 0:
             return {'actor_loss': 0.0, 'critic_loss': 0.0, 'oracle_loss': 0.0}
 
         batch_tensors = self.buffer.get_tensors()
-        metrics = self.trainer.update(batch_tensors, next_value)
+        metrics = self.trainer.update(batch_tensors, next_value, oracle_weight)
         self.buffer.clear()
         return metrics
 
@@ -80,7 +80,7 @@ def run_rl_training(episodes=1000, temperature=1.5):
     print(f"Device: {device}")
 
     model = JoeNet().to(device)
-    weights_path = "models/joenet_phase2_ep7.pth"
+    weights_path = "models/joenet_phase2b_decision_ep3.pth"
     if os.path.exists(weights_path):
         model.load_state_dict(torch.load(weights_path, map_location=device))
         print("-> Successfully loaded Phase 2 Behavioral Clone weights.")
@@ -89,7 +89,7 @@ def run_rl_training(episodes=1000, temperature=1.5):
 
     # train_rl.py (Replacement for Line 92)
     optimizer = Adam([
-        {'params': model.oracle.parameters(), 'lr': 1e-6},  # The Seer's Guard (Micro-LR)
+        {'params': model.oracle.parameters(), 'lr': 1e-4},  # The Seer's Guard (Micro-LR)
         {'params': model.actor.parameters(), 'lr': 1e-4},  # Standard Policy LR
         {'params': model.critic.parameters(), 'lr': 1e-4}  # Standard Value LR
     ])
@@ -107,9 +107,26 @@ def run_rl_training(episodes=1000, temperature=1.5):
         stalemate_occurred = False
         terminal_reward = 0.0
 
-        # --- NEW: Dynamic Player Counts ---
-        # num_players = random.choice([3, 4])
-        num_players = 4
+        # ==========================================
+        # SCHEDULED UNFREEZING LOGIC
+        # ==========================================
+        # Unfreeze much earlier (e.g., Ep 10) so the network can
+        # adapt its prior to the 100% 4-player density.
+        if episode <= 10:
+            current_oracle_weight = 0.0
+            for param in model.oracle.parameters():
+                param.requires_grad = False
+        else:
+            # Keep the weight low initially so a bad Oracle
+            # doesn't completely corrupt the Actor/Critic updates
+            current_oracle_weight = 1.0 if episode < 50 else 10.0
+            for param in model.oracle.parameters():
+                param.requires_grad = True
+
+        model.eval()
+
+        num_players = random.choice([3, 4])
+        # num_players = 4
         ctx = GameContext(num_players=num_players)
         engine = JoeEngine(ctx)
         engine.start_game()
@@ -168,6 +185,8 @@ def run_rl_training(episodes=1000, temperature=1.5):
                 scalar_np = nn_inputs['scalar']
 
                 spatial_t = torch.tensor(spatial_np, dtype=torch.float32).unsqueeze(0).to(device)
+                presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                spatial_t[:, presence_channels, :, :] /= 2.0
                 scalar_t = torch.tensor(scalar_np, dtype=torch.float32).unsqueeze(0).to(device)
                 mask_t = torch.tensor(mask_np, dtype=torch.bool).unsqueeze(0).to(device)
 
@@ -183,8 +202,14 @@ def run_rl_training(episodes=1000, temperature=1.5):
                 current_phi = calculate_state_potential(ctx, active_idx,
                                                         oracle_probs.squeeze(0).cpu().numpy())
                 truth_np = ctx.get_oracle_truth(active_idx)
-                tracker.cache_step(spatial_np, scalar_np, mask_np, action_idx, current_phi,
-                                   truth_np)
+                tracker.cache_step(
+                    spatial_np.copy(),
+                    scalar_np.copy(),
+                    mask_np.copy(),
+                    action_idx,
+                    current_phi,
+                    truth_np.copy()
+                )
 
             else:
                 # --- PLAYERS 1, 2, 3: THE HEURISTIC TEACHERS ---
@@ -195,9 +220,16 @@ def run_rl_training(episodes=1000, temperature=1.5):
             # Execute the chosen action (RL or Heuristic)
             apply_engine_action(engine, ctx, state_id, active_idx, action_idx)
 
+        model.train()
+        if episode <= 10:
+            # If the Oracle is still frozen, keep its BatchNorm strictly locked!
+            model.oracle.eval()
+
         # Trigger Backpropagation based purely on Player 0's experiences
         metrics = runner.trigger_update(
-            next_value=torch.tensor([0.0], dtype=torch.float32).to(device))
+            next_value=torch.tensor([0.0], dtype=torch.float32).to(device),
+            oracle_weight=current_oracle_weight  # Pass the dynamic weight
+        )
 
         elapsed = time.time() - start_time
         if episode % 10 == 0:
