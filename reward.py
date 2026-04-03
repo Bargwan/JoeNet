@@ -35,13 +35,84 @@ class RewardCalculator:
 
         return max(0, total_required - cards_found)
 
-    def calculate_state_potential(self, player_idx: int) -> float:
+    def calculate_state_potential(self, player_idx: int, oracle_probs: np.ndarray = None) -> float:
         """
-        The PBRS Potential Function Phi(s).
-        Formula: -(Distance * win_hunger)
+        The Vision-Guided Sprinter Potential Function.
+        Uses public hand sizes for Threat, and hidden Oracle probabilities for Availability.
         """
-        distance = self.calculate_distance_to_win(player_idx)
-        return float(-(distance * self.win_hunger))
+        raw_distance = self.calculate_distance_to_win(player_idx)
+        raw_deadwood = self._calculate_active_deadwood(player_idx)
+        current_turn = self.ctx.current_circuit
+
+        # ==========================================
+        # 1. ORACLE THREAT (Public Info)
+        # ==========================================
+        # Threat is determined by how close opponents are to going out.
+        # We use public hand sizes: < 8 cards = rising threat, <= 2 cards = max panic.
+        opp_hand_sizes = [
+            len(p.hand_list) for i, p in enumerate(self.ctx.players) if i != player_idx
+        ]
+        min_opp_cards = min(opp_hand_sizes) if opp_hand_sizes else 11
+        # Threat scales from 0.0 (safe) to 1.0 (imminent loss)
+        oracle_threat = min(1.0, max(0.0, (8.0 - min_opp_cards) / 6.0))
+
+        # ==========================================
+        # 2. ORACLE AVAILABILITY (Hidden Info)
+        # ==========================================
+        difficulty_penalty = 0.0
+        if oracle_probs is not None:
+            needed_cards = self._identify_needed_cards(player_idx)
+            for suit, rank in needed_cards:
+                # Sum the probability that ANY of the 3 opponents are holding this card
+                prob_hoarded = min(1.0, np.sum(oracle_probs[:, suit, rank]))
+                prob_available = 1.0 - prob_hoarded
+
+                # If prob_available is 1.0 (in stock), penalty is 0.
+                # If prob_available is 0.0 (dead), penalty spikes dramatically.
+                # Epsilon 0.05 caps the max penalty per card to prevent math explosion.
+                difficulty_penalty += (1.0 / (prob_available + 0.05)) - 1.0
+
+        # ==========================================
+        # 3. THE REWARD SHAPING
+        # ==========================================
+        # Scale the difficulty down slightly so it guides rather than overrides distance
+        effective_distance = raw_distance + (difficulty_penalty * 0.15)
+
+        win_component = -(effective_distance * 40.0)
+        speed_penalty = current_turn * 3.0
+        tide_multiplier = 0.1 + (oracle_threat * 1.4)
+
+        return float(win_component - (raw_deadwood * tide_multiplier) - speed_penalty)
+
+    def _identify_needed_cards(self, player_idx: int) -> list:
+        """
+        Fast heuristic to find the 'edges' of the player's partial melds.
+        Returns a list of (suit, rank) tuples representing specific missing cards.
+        """
+        needed = set()
+        player = self.ctx.players[player_idx]
+        hand = player.private_hand  # Shape: (4, 14)
+
+        # 1. Check partial sets (e.g., have two 8s, need the other two 8s)
+        for rank in range(13):
+            count = np.sum(hand[:, rank])
+            if 1 <= count <= 2:
+                for suit in range(4):
+                    if hand[suit, rank] == 0:
+                        needed.add((suit, rank))
+
+        # 2. Check partial runs (e.g., have 4/5 of Hearts, need 3 or 6 of Hearts)
+        for suit in range(4):
+            for rank in range(13):
+                if hand[suit, rank] > 0:
+                    # Look below
+                    if rank > 1 and hand[suit, rank - 1] == 0:
+                        needed.add((suit, rank - 1))
+                    # Look above (Rank 12 is King)
+                    if rank < 12 and hand[suit, rank + 1] == 0:
+                        needed.add((suit, rank + 1))
+
+        return list(needed)
 
     def calculate_asymmetric_score(self, margin: float) -> float:
         """

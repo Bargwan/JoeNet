@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import random
 import subprocess
 import torch
@@ -18,11 +19,11 @@ from rl_trainer import RLTrainer
 from agents import HeuristicAgent
 
 def calculate_pbrs_reward(current_phi: float, next_phi: float, is_terminal: bool,
-                          terminal_score: float) -> float:
+                          terminal_score: float, gamma: float = 0.99) -> float:
+    """Includes the missing Gamma discount factor for the Andrew Ng PBRS proof."""
     if is_terminal:
         return terminal_score - current_phi
-    return next_phi - current_phi
-
+    return (gamma * next_phi) - current_phi
 
 class RLRunner:
     def __init__(self, model, trainer, buffer):
@@ -30,38 +31,56 @@ class RLRunner:
         self.trainer = trainer
         self.buffer = buffer
 
-    def trigger_update(self, next_value: torch.Tensor, oracle_weight: float = 0.0):
+    def trigger_update(self, next_value: torch.Tensor):
         if len(self.buffer) == 0:
             return {'actor_loss': 0.0, 'critic_loss': 0.0, 'oracle_loss': 0.0}
 
         batch_tensors = self.buffer.get_tensors()
-        metrics = self.trainer.update(batch_tensors, next_value, oracle_weight)
+        metrics = self.trainer.update(batch_tensors, next_value)
         self.buffer.clear()
         return metrics
 
 
-class EpisodeTracker:
-    def __init__(self, buffer):
-        self.buffer = buffer
-        self.cached_step = None
+from typing import Dict, Tuple, Optional
+import numpy as np
 
-    def cache_step(self, spatial, scalar, mask, action, current_phi, oracle_truth):
-        if self.cached_step is not None:
-            old_spatial, old_scalar, old_mask, old_action, old_phi, old_truth = self.cached_step
-            reward = calculate_pbrs_reward(old_phi, current_phi, False, 0.0)
+
+class MultiPlayerTracker:
+    """Tracks separate experience trajectories for all players simultaneously."""
+
+    def __init__(self, buffer, num_players: int, gamma: float = 0.99):
+        self.buffer = buffer
+        self.gamma = gamma
+
+        # Explicit type hinting clears the PyCharm static analysis warning
+        self.cached_steps: Dict[
+            int, Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray]]] = {
+            i: None for i in range(num_players)
+        }
+
+    def cache_step(self, player_idx: int, spatial: np.ndarray, scalar: np.ndarray,
+                   mask: np.ndarray, action: int, current_phi: float, oracle_truth: np.ndarray):
+
+        if self.cached_steps[player_idx] is not None:
+            old_spatial, old_scalar, old_mask, old_action, old_phi, old_truth = self.cached_steps[
+                player_idx]
+            # Dense step reward using Gamma
+            reward = calculate_pbrs_reward(old_phi, current_phi, False, 0.0, self.gamma)
             self.buffer.add(old_spatial, old_scalar, old_mask, old_action, reward,
                             is_terminal=False, oracle_truth=old_truth)
 
-        self.cached_step = (spatial, scalar, mask, action, current_phi, oracle_truth)
+        # Cache the new step
+        self.cached_steps[player_idx] = (spatial, scalar, mask, action, current_phi, oracle_truth)
 
-    def flush_terminal(self, terminal_score: float):
-        if self.cached_step is not None:
-            old_spatial, old_scalar, old_mask, old_action, old_phi, old_truth = self.cached_step
-            reward = calculate_pbrs_reward(old_phi, 0.0, True, terminal_score)
+    def flush_terminal(self, player_idx: int, terminal_score: float):
+        if self.cached_steps[player_idx] is not None:
+            old_spatial, old_scalar, old_mask, old_action, old_phi, old_truth = self.cached_steps[
+                player_idx]
+            # Terminal step reward using actual game score
+            reward = calculate_pbrs_reward(old_phi, 0.0, True, terminal_score, self.gamma)
             self.buffer.add(old_spatial, old_scalar, old_mask, old_action, reward,
                             is_terminal=True, oracle_truth=old_truth)
-            self.cached_step = None
-
+            self.cached_steps[player_idx] = None
 
 def calculate_state_potential(ctx, player_idx, oracle_probs=None):
     """
@@ -80,18 +99,23 @@ def run_rl_training(episodes=1000, temperature=1.5):
     print(f"Device: {device}")
 
     model = JoeNet().to(device)
-    weights_path = "models/joenet_phase2b_decision_ep3.pth"
+    weights_path = "models/joenet_phase2b_decision_ep8.pth"
     if os.path.exists(weights_path):
-        model.load_state_dict(torch.load(weights_path, map_location=device))
-        print("-> Successfully loaded Phase 2 Behavioral Clone weights.")
+        model.load_state_dict(torch.load(weights_path, map_location=device), strict=False)
+        print("-> Successfully loaded Phase 2 Dual Oracle weights.")
     else:
         print("-> WARNING: Phase 2 weights not found. Starting from random initialization!")
 
-    # train_rl.py (Replacement for Line 92)
+        # --- NEW: PERMANENTLY FREEZE BOTH ORACLES ---
+    for param in model.oracle_3p.parameters():
+        param.requires_grad = False
+    for param in model.oracle_4p.parameters():
+        param.requires_grad = False
+
+        # Initialize Optimizer ONLY for Actor and Critic
     optimizer = Adam([
-        {'params': model.oracle.parameters(), 'lr': 1e-4},  # The Seer's Guard (Micro-LR)
-        {'params': model.actor.parameters(), 'lr': 1e-4},  # Standard Policy LR
-        {'params': model.critic.parameters(), 'lr': 1e-4}  # Standard Value LR
+        {'params': model.actor.parameters(), 'lr': 1e-4},
+        {'params': model.critic.parameters(), 'lr': 1e-4}
     ])
     buffer = RolloutBuffer()
     trainer = RLTrainer(model, optimizer, gamma=0.99)
@@ -100,42 +124,31 @@ def run_rl_training(episodes=1000, temperature=1.5):
     rl_agent = NeuralAgent(model, device)
 
     # Initialize TensorBoard Writer
-    writer = SummaryWriter(log_dir="runs/joenet_phase3_crucible")
-    for episode in range(1, episodes + 1):
-        # Starts at 1.5 (heavy exploration) and smoothly decays to 0.5 (heavy exploitation)
-        current_temp = max(0.5, 1.5 - (episode / 800.0))
-        stalemate_occurred = False
-        terminal_reward = 0.0
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_name = f"JoeNet_RL_{timestamp}"
+    log_dir = os.path.join("runs", log_name)
 
-        # ==========================================
-        # SCHEDULED UNFREEZING LOGIC
-        # ==========================================
-        # Unfreeze much earlier (e.g., Ep 10) so the network can
-        # adapt its prior to the 100% 4-player density.
-        if episode <= 10:
-            current_oracle_weight = 0.0
-            for param in model.oracle.parameters():
-                param.requires_grad = False
-        else:
-            # Keep the weight low initially so a bad Oracle
-            # doesn't completely corrupt the Actor/Critic updates
-            current_oracle_weight = 1.0 if episode < 50 else 10.0
-            for param in model.oracle.parameters():
-                param.requires_grad = True
+    writer = SummaryWriter(log_dir=log_dir)
+
+    # --- NEW: Batch Accumulation Parameters ---
+    update_frequency = 10  # Accumulate 10 full games before updating the network
+    games_since_update = 0
+    last_metrics = {'actor_loss': 0.0, 'critic_loss': 0.0, 'oracle_loss_3p': 0.0,
+                    'oracle_loss_4p': 0.0}
+
+    for episode in range(1, episodes + 1):
+        current_temp = max(0.1, 0.8 - (episode / 700.0))
+        stalemate_occurred = False
+        tb_terminal_reward = 0.0  # Just for Tensorboard logging
 
         model.eval()
-
         num_players = random.choice([3, 4])
-        # num_players = 4
         ctx = GameContext(num_players=num_players)
         engine = JoeEngine(ctx)
         engine.start_game()
 
-        # --- NEW: We ONLY track the RL Agent (Player 0) ---
-        tracker = EpisodeTracker(buffer)
-
-        # --- FIXED: Independent Teacher Bots ---
-        heuristic_bots = {i: HeuristicAgent() for i in range(1, num_players)}
+        # --- NEW: Track ALL players ---
+        tracker = MultiPlayerTracker(buffer, num_players)
         start_time = time.time()
 
         while True:
@@ -144,30 +157,29 @@ def run_rl_training(episodes=1000, temperature=1.5):
 
             if state_id == 'game_over':
                 ctx.calculate_scores()
-                # ONLY flush Player 0's score into the buffer
-                terminal_reward = -float(ctx.players[0].score)
-                tracker.flush_terminal(terminal_reward)
+                # --- NEW: Flush ALL players into the buffer ---
+                for i in range(num_players):
+                    terminal_reward = -float(ctx.players[i].score)
+                    tracker.flush_terminal(i, terminal_reward)
+                    if i == 0:  # Keep Player 0's score for TensorBoard tracking
+                        tb_terminal_reward = terminal_reward
                 break
 
             if ctx.current_circuit >= ctx.config.max_turns:
-                # --- Handling stalemates ---
-                # Assign a flat penalty slightly worse than a normal loss
-                stalemate_penalty = -50.0
-                tracker.flush_terminal(stalemate_penalty)
+                # --- NEW: The FATAL Stalemate Penalty ---
+                stalemate_penalty = -500.0
+                for i in range(num_players):
+                    tracker.flush_terminal(i, stalemate_penalty)
 
-                # Flag it for TensorBoard
                 stalemate_occurred = True
-                terminal_reward = stalemate_penalty
-
-                # Log the hands to see exactly who was hoarding what!
+                tb_terminal_reward = stalemate_penalty
                 _log_stalemate_hands(ctx)
-
                 break
 
+            # ... (Dealing and Start Turn remain the same) ...
             if state_id == 'dealing':
                 engine.deal_cards()
                 continue
-
             if state_id == 'start_turn':
                 engine.enter_pickup()
                 continue
@@ -175,66 +187,67 @@ def run_rl_training(episodes=1000, temperature=1.5):
             active_idx = ctx.may_i_target_idx if state_id == 'may_i_decision' else ctx.active_player_idx
             mask_np = ctx.get_action_mask(active_idx, state_id)
 
-            # ==========================================
-            # THE MIXED ROUTER
-            # ==========================================
-            if active_idx == 0:
-                # --- PLAYER 0: THE RL LEARNER ---
-                nn_inputs = ctx.get_input_tensor(active_idx, state_id)
-                spatial_np = nn_inputs['spatial']
-                scalar_np = nn_inputs['scalar']
+            nn_inputs = ctx.get_input_tensor(active_idx, state_id)
+            spatial_np = nn_inputs['spatial']
+            scalar_np = nn_inputs['scalar']
 
-                spatial_t = torch.tensor(spatial_np, dtype=torch.float32).unsqueeze(0).to(device)
-                presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-                spatial_t[:, presence_channels, :, :] /= 2.0
-                scalar_t = torch.tensor(scalar_np, dtype=torch.float32).unsqueeze(0).to(device)
-                mask_t = torch.tensor(mask_np, dtype=torch.bool).unsqueeze(0).to(device)
+            spatial_t = torch.tensor(spatial_np, dtype=torch.float32).unsqueeze(0).to(device)
+            presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            spatial_t[:, presence_channels, :, :] /= 2.0
+            scalar_t = torch.tensor(scalar_np, dtype=torch.float32).unsqueeze(0).to(device)
+            mask_t = torch.tensor(mask_np, dtype=torch.bool).unsqueeze(0).to(device)
 
-                with torch.no_grad():
-                    logits, values, oracle_probs = model(spatial_t, scalar_t, mask_t)
+            with torch.no_grad():
+                logits, values, oracle_probs = model(spatial_t, scalar_t, mask_t)
 
-                # Player 0 explores based on the decaying temperature
-                action_idx = rl_agent.compute_action_with_exploration(
-                    logits.squeeze(0), mask_np, temperature=current_temp
-                )
+            action_idx = rl_agent.compute_action_with_exploration(
+                logits.squeeze(0), mask_np, temperature=current_temp
+            )
 
-                # ONLY cache Player 0 for training
-                current_phi = calculate_state_potential(ctx, active_idx,
-                                                        oracle_probs.squeeze(0).cpu().numpy())
-                truth_np = ctx.get_oracle_truth(active_idx)
-                tracker.cache_step(
-                    spatial_np.copy(),
-                    scalar_np.copy(),
-                    mask_np.copy(),
-                    action_idx,
-                    current_phi,
-                    truth_np.copy()
-                )
+            # --- NEW: ALL clones cache their data ---
+            current_phi = calculate_state_potential(ctx, active_idx,
+                                                    oracle_probs.squeeze(0).cpu().numpy())
+            truth_np = ctx.get_oracle_truth(active_idx)
+            tracker.cache_step(
+                active_idx,  # Pass the specific player index
+                spatial_np.copy(),
+                scalar_np.copy(),
+                mask_np.copy(),
+                action_idx,
+                current_phi,
+                truth_np.copy()
+            )
 
-            else:
-                # --- PLAYERS 1, 2, 3: THE HEURISTIC TEACHERS ---
-                # CORRECTED: Query the specific independent bot
-                action_idx = heuristic_bots[active_idx].select_action(state_id, ctx, active_idx,
-                                                                      mask_np)
-
-            # Execute the chosen action (RL or Heuristic)
             apply_engine_action(engine, ctx, state_id, active_idx, action_idx)
 
-        model.train()
-        if episode <= 10:
-            # If the Oracle is still frozen, keep its BatchNorm strictly locked!
-            model.oracle.eval()
+        # ==========================================
+        # BATCH ACCUMULATION LOGIC
+        # ==========================================
+        games_since_update += 1
 
-        # Trigger Backpropagation based purely on Player 0's experiences
-        metrics = runner.trigger_update(
-            next_value=torch.tensor([0.0], dtype=torch.float32).to(device),
-            oracle_weight=current_oracle_weight  # Pass the dynamic weight
-        )
+        if games_since_update >= update_frequency:
+            model.train()
+            model.oracle_3p.eval()
+            model.oracle_4p.eval()
+
+            # Trigger update on the massive accumulated buffer
+            last_metrics = runner.trigger_update(
+                next_value=torch.tensor([0.0], dtype=torch.float32).to(device)
+            )
+            games_since_update = 0
+
+            # CRITICAL: Return model to eval mode for the next rollout
+            model.eval()
 
         elapsed = time.time() - start_time
+
+        # Use last_metrics for printing and TensorBoard
         if episode % 10 == 0:
-            print(
-                f"Ep {episode:04d} ({num_players}P) | Time: {elapsed:.1f}s | ActLoss: {metrics['actor_loss']:.4f} | CritLoss: {metrics['critic_loss']:.4f}")
+            active_oracle_loss = last_metrics['oracle_loss_3p'] if num_players == 3 else \
+            last_metrics['oracle_loss_4p']
+            print(f"Ep {episode:04d} ({num_players}P) | Time: {elapsed:.1f}s | "
+                  f"ActLoss: {last_metrics['actor_loss']:.4f} | CritLoss: {last_metrics['critic_loss']:.4f} | "
+                  f"Oracle: {active_oracle_loss:.4f}")
 
         # --- NEW: Save Intermediate Checkpoints ---
         if episode % 50 == 0:
@@ -273,13 +286,18 @@ def run_rl_training(episodes=1000, temperature=1.5):
 
         # 3. TensorBoard Broadcasting
         # Core Losses
-        writer.add_scalar('Loss/Actor', metrics['actor_loss'], episode)
-        writer.add_scalar('Loss/Critic', metrics['critic_loss'], episode)
-        writer.add_scalar('Loss/Oracle', metrics['oracle_loss'], episode)
+        writer.add_scalar('Loss/Actor', last_metrics['actor_loss'], episode)
+        writer.add_scalar('Loss/Critic', last_metrics['critic_loss'], episode)
+
+        # --- FIXED: Only broadcast the Oracle loss that was actually active this episode ---
+        if num_players == 3:
+            writer.add_scalar('Loss/Oracle_3P', last_metrics['oracle_loss_3p'], episode)
+        elif num_players == 4:
+            writer.add_scalar('Loss/Oracle_4P', last_metrics['oracle_loss_4p'], episode)
 
         # Performance & Health
         writer.add_scalar('Performance/Time_Elapsed_Secs', elapsed, episode)
-        writer.add_scalar(f'Reward/Terminal_Score_{num_players}P', terminal_reward, episode)
+        writer.add_scalar(f'Reward/Terminal_Score_{num_players}P', tb_terminal_reward, episode)
 
         writer.add_scalar(f'Health/Stalemates_{num_players}P', 1 if stalemate_occurred else 0,
                           episode)

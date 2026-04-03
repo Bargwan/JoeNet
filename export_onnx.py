@@ -6,18 +6,27 @@ class JoeNetDeployment(torch.nn.Module):
 
     def __init__(self, base_model):
         super().__init__()
-        self.oracle = base_model.oracle
+        self.oracle_3p = base_model.oracle_3p
+        self.oracle_4p = base_model.oracle_4p
         self.actor = base_model.actor
 
     def forward(self, spatial, scalar, mask):
-        # 1. Oracle predicts hands
-        oracle_probs = self.oracle(spatial, scalar)
+        # 1. Extract the 3P flag and reshape it to broadcast across the spatial dimensions
+        # Shape becomes (Batch, 1, 1, 1) so it can mask the (Batch, 3, 4, 14) Oracles
+        is_3p_mask = (scalar[:, 22] > 0.5).view(-1, 1, 1, 1)
 
-        # 2. Manual concatenation (avoids importing external functions)
+        # 2. Evaluate BOTH specialists (ONNX prefers static execution paths)
+        probs_3p = self.oracle_3p(spatial, scalar)
+        probs_3p[:, 2, :, :] = 0.0  # Maintain the absolute zero silence rule
+
+        probs_4p = self.oracle_4p(spatial, scalar)
+
+        # 3. Use an ONNX-compliant multiplexer node to choose the correct prediction
+        oracle_probs = torch.where(is_3p_mask, probs_3p, probs_4p)
+
+        # 4. Concatenate and act
         expanded_spatial = torch.cat([spatial, oracle_probs], dim=1)
-
-        # 3. Actor generates policy (Critic is completely bypassed)
-        logits = self.actor(expanded_spatial, scalar, mask)
+        logits = self.actor(expanded_spatial, scalar, action_mask=mask)
 
         return logits
 

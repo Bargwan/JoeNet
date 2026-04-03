@@ -209,27 +209,47 @@ class ActorNet(nn.Module):
 
 
 class JoeNet(nn.Module):
-    """
-    The unified Deep Reinforcement Learning Architecture.
-    Combines the Belief State (Oracle) with the Actor-Critic decision makers.
-    """
-
     def __init__(self):
         super().__init__()
-        self.oracle = OracleNet()
-        self.critic = CriticNet()
+        # The Vision Specialists
+        self.oracle_3p = OracleNet()
+        self.oracle_4p = OracleNet()
+
+        # The Decision Makers (Shared)
         self.actor = ActorNet()
+        self.critic = CriticNet()
 
-    def forward(self, spatial_x: torch.Tensor, scalar_x: torch.Tensor,
-                action_mask: torch.Tensor = None):
-        # 1. Oracle predicts the hidden opponent hands
-        oracle_probs = self.oracle(spatial_x, scalar_x)
+    def forward(self, spatial, scalar, mask):
+        # Extract the 3-Player flag (assuming batch dimension: scalar[:, 22])
+        is_3_player = scalar[:, 22].bool()
 
-        # 2. The Concatenation Trick: Expand public vision with predicted hidden vision
-        expanded_spatial = expand_spatial_with_oracle(spatial_x, oracle_probs)
+        # Create an empty tensor to hold the mixed batch results
+        batch_size = spatial.shape[0]
+        oracle_probs = torch.zeros((batch_size, 3, 4, 14), device=spatial.device)
 
-        # 3. Actor and Critic evaluate the expanded reality
-        ev = self.critic(expanded_spatial, scalar_x)
-        logits = self.actor(expanded_spatial, scalar_x, action_mask)
+        # Route the 3-player games to the 3P Specialist
+        if is_3_player.any():
+            # FIXED: Oracles require both spatial and scalar inputs
+            probs_3p = self.oracle_3p(spatial[is_3_player], scalar[is_3_player])
 
-        return logits, ev, oracle_probs
+            # --- ENFORCE ABSOLUTE ZERO ---
+            # Manually kill any Sigmoid floating-point noise in the 3rd opponent slot
+            probs_3p[:, 2, :, :] = 0.0
+
+            oracle_probs[is_3_player] = probs_3p
+
+        # Route the 4-player games to the 4P Specialist
+        if (~is_3_player).any():
+            # FIXED: Oracles require both spatial and scalar inputs
+            oracle_probs[~is_3_player] = self.oracle_4p(spatial[~is_3_player], scalar[~is_3_player])
+
+        # --- FIXED: The Concatenation Trick ---
+        # Expand the spatial tensor from 13 channels to 16 channels BEFORE passing to Actor/Critic
+        expanded_spatial = expand_spatial_with_oracle(spatial, oracle_probs)
+
+        # Feed the combined 16-channel results to the shared Actor and Critic
+        # FIXED: Pass the mask to the Actor
+        actor_logits = self.actor(expanded_spatial, scalar, action_mask=mask)
+        critic_value = self.critic(expanded_spatial, scalar)
+
+        return actor_logits, critic_value, oracle_probs

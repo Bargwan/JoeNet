@@ -14,8 +14,7 @@ class RLTrainer:
         self.optimizer = optimizer
         self.gamma = gamma
 
-    def update(self, batch_tensors: dict, next_value: torch.Tensor,
-               oracle_weight: float = 0.0) -> dict:
+    def update(self, batch_tensors: dict, next_value: torch.Tensor) -> dict:
         """
         Computes the losses and updates the network weights.
         """
@@ -66,12 +65,31 @@ class RLTrainer:
 
         # Policy Gradient formula: Maximize expected reward -> Minimize -log(P(a|s)) * Advantage
         actor_loss = -(action_log_probs * advantages).mean()
-        assert oracle_probs.shape == oracle_truths.shape, f"Payload Mismatch! Probs: {oracle_probs.shape} vs Truths: {oracle_truths.shape}"
-        oracle_loss = F.binary_cross_entropy(oracle_probs, oracle_truths)
+
+
+        # Calculate Oracle Loss strictly for TensorBoard monitoring
+        with torch.no_grad():
+            is_3_player = scalar[:, 22].bool()
+
+            oracle_loss_3p = 0.0
+            if is_3_player.any():
+                # --- ADJUSTED: Slice out the 3rd opponent (index 2) ---
+                adjusted_probs_3p = oracle_probs[is_3_player][:, :2, :, :]
+                adjusted_truths_3p = oracle_truths[is_3_player][:, :2, :, :]
+
+                oracle_loss_3p = F.binary_cross_entropy(
+                    adjusted_probs_3p, adjusted_truths_3p
+                ).item()
+
+            oracle_loss_4p = 0.0
+            if (~is_3_player).any():
+                oracle_loss_4p = F.binary_cross_entropy(
+                    oracle_probs[~is_3_player], oracle_truths[~is_3_player]
+                ).item()
 
         # 5. Backpropagation
-        # --- FIXED: Dynamic Oracle Weighting ---
-        total_loss = actor_loss + critic_loss + (oracle_loss * oracle_weight)
+        # --- Only backpropagate Actor and Critic ---
+        total_loss = actor_loss + critic_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -81,5 +99,6 @@ class RLTrainer:
         return {
             'actor_loss': actor_loss.item(),
             'critic_loss': critic_loss.item(),
-            'oracle_loss': oracle_loss.item()
+            'oracle_loss_3p': oracle_loss_3p,
+            'oracle_loss_4p': oracle_loss_4p
         }

@@ -10,35 +10,60 @@ from torch.utils.tensorboard import SummaryWriter
 
 def train_supervised_epoch(model, dataloader, optimizer, device, mode, actor_weights=None):
     model.train()
-    # Let PyTorch handle the None fallback natively
     actor_criterion = nn.CrossEntropyLoss(weight=actor_weights)
     critic_criterion = nn.MSELoss()
     oracle_criterion = nn.BCELoss()
 
-    total_actor_loss, total_critic_loss, total_oracle_loss = 0.0, 0.0, 0.0
+    total_actor_loss, total_critic_loss = 0.0, 0.0
+    total_oracle_3p_loss, total_oracle_4p_loss = 0.0, 0.0
     total_combined_loss, total_entropy = 0.0, 0.0
     num_batches = 0
+    batches_3p, batches_4p = 0, 0
 
     for batch in dataloader:
         t_spatial, t_scalar, t_mask, t_oracle_truth, t_score, t_policy = [b.to(device) for b in
                                                                           batch]
         optimizer.zero_grad()
 
+        is_3_player = t_scalar[:, 22].bool()
+        mask_3p = is_3_player
+        mask_4p = ~is_3_player
+
         if mode == 'oracle':
-            # Phase 2A: Isolate Vision
-            oracle_probs = model.oracle(t_spatial, t_scalar)
-            loss = oracle_criterion(oracle_probs, t_oracle_truth)
+            loss = 0.0
+
+            if mask_3p.any():
+                probs_3p = model.oracle_3p(t_spatial[mask_3p], t_scalar[mask_3p])
+                adjusted_probs_3p = probs_3p[:, :2, :, :]
+                adjusted_truth_3p = t_oracle_truth[mask_3p][:, :2, :, :]
+                loss_3p = oracle_criterion(adjusted_probs_3p, adjusted_truth_3p)
+                loss += loss_3p
+                total_oracle_3p_loss += loss_3p.item()
+                batches_3p += 1
+
+            if mask_4p.any():
+                probs_4p = model.oracle_4p(t_spatial[mask_4p], t_scalar[mask_4p])
+                loss_4p = oracle_criterion(probs_4p, t_oracle_truth[mask_4p])
+                loss += loss_4p
+                total_oracle_4p_loss += loss_4p.item()
+                batches_4p += 1
 
             loss.backward()
             optimizer.step()
-
-            total_oracle_loss += loss.item()
             total_combined_loss += loss.item()
 
         elif mode == 'decision':
-            # Phase 2B: Isolate Policy/Value with Frozen Vision
+            # Phase 2B: Isolate Policy/Value with Frozen Vision Specialists
             with torch.no_grad():
-                oracle_probs = model.oracle(t_spatial, t_scalar)
+                # Initialize an empty tensor to hold the combined predictions
+                batch_size = t_spatial.shape[0]
+                oracle_probs = torch.zeros((batch_size, 3, 4, 14), device=device)
+
+                # Fill the tensor using the respective specialists
+                if mask_3p.any():
+                    oracle_probs[mask_3p] = model.oracle_3p(t_spatial[mask_3p], t_scalar[mask_3p])
+                if mask_4p.any():
+                    oracle_probs[mask_4p] = model.oracle_4p(t_spatial[mask_4p], t_scalar[mask_4p])
 
             expanded_spatial = expand_spatial_with_oracle(t_spatial, oracle_probs)
             ev = model.critic(expanded_spatial, t_scalar)
@@ -62,8 +87,8 @@ def train_supervised_epoch(model, dataloader, optimizer, device, mode, actor_wei
 
         num_batches += 1
 
-    return (total_actor_loss, total_critic_loss, total_oracle_loss,
-            total_combined_loss, total_entropy, num_batches)
+    return (total_actor_loss, total_critic_loss, total_oracle_3p_loss, total_oracle_4p_loss,
+            total_combined_loss, total_entropy, num_batches, batches_3p, batches_4p)
 
 
 if __name__ == "__main__":
@@ -108,17 +133,24 @@ if __name__ == "__main__":
 
     if args.mode == 'oracle':
         learning_rate = 1e-4
-        optimizer = torch.optim.Adam(model.oracle.parameters(), lr=learning_rate)
+        # --- FIXED: Combine parameters from both specialists into one optimizer ---
+        optimizer = torch.optim.Adam(
+            list(model.oracle_3p.parameters()) + list(model.oracle_4p.parameters()),
+            lr=learning_rate
+        )
         writer = SummaryWriter(log_dir="runs/joenet_phase2a_oracle")
         save_prefix = "models/joenet_phase2a_oracle"
     else:
         if not args.oracle_weights or not os.path.exists(args.oracle_weights):
             raise ValueError("Decision mode requires valid --oracle_weights path.")
 
-        print(f"Loading Frozen Oracle Vision from {args.oracle_weights}...")
+        print(f"Loading Frozen Dual Oracles from {args.oracle_weights}...")
         model.load_state_dict(torch.load(args.oracle_weights, map_location=device), strict=False)
 
-        for param in model.oracle.parameters():
+        # --- FIXED: Freeze both specialists ---
+        for param in model.oracle_3p.parameters():
+            param.requires_grad = False
+        for param in model.oracle_4p.parameters():
             param.requires_grad = False
 
         learning_rate = 1e-3
@@ -133,7 +165,9 @@ if __name__ == "__main__":
 
     for epoch in range(epochs):
         print(f"\n--- Epoch {epoch + 1}/{epochs} ---")
-        ep_act, ep_crit, ep_ora, ep_tot, ep_ent, ep_batches = 0.0, 0.0, 0.0, 0.0, 0.0, 0
+        # --- FIXED: Epoch level accumulators ---
+        ep_act, ep_crit, ep_tot, ep_ent, ep_batches = 0.0, 0.0, 0.0, 0.0, 0
+        ep_ora_3p, ep_ora_4p, ep_batches_3p, ep_batches_4p = 0.0, 0.0, 0, 0
 
         for start_idx in range(0, total_size, CHUNK_SIZE):
             end_idx = min(start_idx + CHUNK_SIZE, total_size)
@@ -161,32 +195,38 @@ if __name__ == "__main__":
             chunk_dataset = TensorDataset(t_spatial, t_scalar, t_mask, t_oracle, t_score, t_policy)
             chunk_loader = DataLoader(chunk_dataset, batch_size=batch_size, shuffle=True)
 
-            c_act, c_crit, c_ora, c_tot, c_ent, c_batches = train_supervised_epoch(
+            c_act, c_crit, c_ora_3p, c_ora_4p, c_tot, c_ent, c_batches, c_b3p, c_b4p = train_supervised_epoch(
                 model, chunk_loader, optimizer, device, args.mode, actor_weights)
 
             ep_act += c_act
             ep_crit += c_crit
-            ep_ora += c_ora
+            ep_ora_3p += c_ora_3p
+            ep_ora_4p += c_ora_4p
             ep_tot += c_tot
             ep_ent += c_ent
             ep_batches += c_batches
+            ep_batches_3p += c_b3p
+            ep_batches_4p += c_b4p
 
             del np_spatial, t_spatial, chunk_dataset, chunk_loader
 
-        avg_act, avg_crit, avg_ora, avg_tot, avg_ent = (
-            ep_act / ep_batches, ep_crit / ep_batches, ep_ora / ep_batches,
-            ep_tot / ep_batches, ep_ent / ep_batches
-        )
+        avg_act = ep_act / max(1, ep_batches)
+        avg_crit = ep_crit / max(1, ep_batches)
+        avg_ora_3p = ep_ora_3p / max(1, ep_batches_3p)
+        avg_ora_4p = ep_ora_4p / max(1, ep_batches_4p)
+        avg_tot = ep_tot / max(1, ep_batches)
+        avg_ent = ep_ent / max(1, ep_batches)
 
         print(f"Epoch {epoch + 1} | Actor: {avg_act:.4f} | Critic: {avg_crit:.4f} | "
-              f"Oracle: {avg_ora:.4f} | Entropy: {avg_ent:.4f}")
+              f"Oracle_3P: {avg_ora_3p:.4f} | Oracle_4P: {avg_ora_4p:.4f} | Entropy: {avg_ent:.4f}")
 
         if args.mode == 'decision':
             writer.add_scalar('Loss/Actor', avg_act, epoch + 1)
             writer.add_scalar('Loss/Critic', avg_crit, epoch + 1)
             writer.add_scalar('Health/Actor_Entropy', avg_ent, epoch + 1)
         else:
-            writer.add_scalar('Loss/Oracle', avg_ora, epoch + 1)
+            writer.add_scalar('Loss/Oracle_3P', avg_ora_3p, epoch + 1)
+            writer.add_scalar('Loss/Oracle_4P', avg_ora_4p, epoch + 1)
 
         writer.add_scalar('Loss/Total', avg_tot, epoch + 1)
 

@@ -1,4 +1,5 @@
 import os
+import random
 
 from evaluate_arena import apply_engine_action
 
@@ -141,7 +142,7 @@ def generate_data(num_games=1000, max_size=500000, output_file="joe_phase1_sandb
     start_time = time.time()
 
     # The iterable just passes a unique game seed ID to each worker
-    iterable = [(i, 3) for i in range(num_games)]
+    iterable = [(i, random.choice([3, 4])) for i in range(num_games)]
 
     with multiprocessing.Pool(processes=num_cores,
                               initializer=_mute_worker_keyboard_interrupt) as pool:
