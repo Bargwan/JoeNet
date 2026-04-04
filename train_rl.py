@@ -3,9 +3,11 @@ from datetime import datetime
 import random
 import subprocess
 import torch
+import torch.nn.functional as F
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 import time
+
 
 from export_onnx import export_joenet_to_onnx, JoeNetDeployment
 from network import JoeNet
@@ -72,6 +74,26 @@ class MultiPlayerTracker:
         # Cache the new step
         self.cached_steps[player_idx] = (spatial, scalar, mask, action, current_phi, oracle_truth)
 
+    def flush_round_boundary(self):
+        """
+        Breaks the PBRS chain between rounds so the network doesn't get
+        penalized when its hand is wiped by the dealer.
+        """
+        for i in range(len(self.cached_steps)):
+            if self.cached_steps[i] is not None:
+                old_spatial, old_scalar, old_mask, old_action, old_phi, old_truth = \
+                self.cached_steps[i]
+
+                # Close out the round's PBRS mathematically (treating hand as 0 mass),
+                # but DO NOT flag it as terminal for the actual game trajectory.
+                reward = calculate_pbrs_reward(old_phi, 0.0, True, 0.0, self.gamma)
+
+                self.buffer.add(old_spatial, old_scalar, old_mask, old_action, reward,
+                                is_terminal=False, oracle_truth=old_truth)
+
+                # Wipe the cache so Round N+1 starts with a fresh delta calculation
+                self.cached_steps[i] = None
+
     def flush_terminal(self, player_idx: int, terminal_score: float):
         if self.cached_steps[player_idx] is not None:
             old_spatial, old_scalar, old_mask, old_action, old_phi, old_truth = self.cached_steps[
@@ -89,6 +111,61 @@ def calculate_state_potential(ctx, player_idx, oracle_probs=None):
     calc = RewardCalculator(ctx)
     # The RewardCalculator already evaluates the entire hand's potential at once
     return calc.calculate_state_potential(player_idx)
+
+
+def count_completed_objectives(ctx, player_idx) -> tuple:
+    """Helper to count completed objectives using the communal table reality."""
+    req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+    player = ctx.players[player_idx]
+
+    # If the engine says they are down, the objectives are permanently met.
+    if player.is_down:
+        return req_sets, req_runs
+
+    # Otherwise, scan their physical secret hand
+    calc = RewardCalculator(ctx)
+    sets = calc._get_potential_sets(player.hand_list)
+    runs = calc._get_potential_runs(player.hand_list)
+
+    valid_sets = sum(1 for s in sets if s >= 3)
+    valid_runs = sum(1 for r in runs if r >= 4)
+
+    return min(valid_sets, req_sets), min(valid_runs, req_runs)
+
+
+def calculate_safe_potential(my_hand, oracle_probs, completed_sets, completed_runs) -> float:
+    """The PyTorch Spatial Potential Function (Communal Table Safe)."""
+    device = my_hand.device
+
+    # 1. Pure Secret Hand Assets
+    hand_size = torch.clamp(torch.sum(my_hand), min=1.0)
+
+    # 2. Base Availability & Fertility
+    # oracle_probs is 4D: [Batch, Opponents, Suits, Ranks]
+    # Multiply across dim=1 (the 3 opponents) to find probability NO opponent has it
+    availability = torch.prod(1.0 - oracle_probs, dim=1, keepdim=True)
+
+    # Sum across dim=2 (the 4 suits) to find Set Fertility
+    set_fertility = availability.sum(dim=2, keepdim=True) - availability
+
+    set_fertility_masked = set_fertility.clone()
+    # Mask out the 4th dimension (Ranks) for Ace High
+    set_fertility_masked[:, :, :, 13] = 0.0
+
+    run_kernel = torch.tensor([[[[0.5, 1.0, 0.0, 1.0, 0.5]]]], device=device)
+    padded_avail = F.pad(availability, (2, 2, 0, 0), mode='constant', value=0.0)
+    run_fertility = F.conv2d(padded_avail, run_kernel)
+
+    # 3. Average Potentials (Protects May-I and Go Down)
+    avg_set_potential = torch.sum(my_hand * set_fertility_masked) / hand_size
+    avg_run_potential = torch.sum(my_hand * run_fertility) / hand_size
+
+    # 4. Static Weights & The Staircase
+    spatial_potential = (avg_set_potential * 1.0) + (avg_run_potential * 1.5)
+    objective_bonus = (completed_sets * 30.0) + (completed_runs * 50.0)
+
+    return (spatial_potential + objective_bonus).item()
+
 
 def run_rl_training(episodes=1000, temperature=1.5):
     print("==================================================")
@@ -155,18 +232,34 @@ def run_rl_training(episodes=1000, temperature=1.5):
             raw_state_id = engine.current_state.id
             state_id = raw_state_id.lower().replace(' ', '_').replace('-', '_')
 
+            # tournament end
             if state_id == 'game_over':
-                ctx.calculate_scores()
-                # --- NEW: Flush ALL players into the buffer ---
+                # REMOVED: ctx.calculate_scores()
+                # The fast_engine already calculated Round 7 perfectly.
+                # player.score now contains the TRUE 7-round cumulative deadwood.
+
+                total_deadwood = sum(ctx.players[p].score for p in range(num_players))
+
                 for i in range(num_players):
-                    terminal_reward = -float(ctx.players[i].score)
+                    my_score = float(ctx.players[i].score)
+                    avg_opponent_score = (total_deadwood - my_score) / max(1, (num_players - 1))
+
+                    # The Ultimate Tournament Reward
+                    terminal_reward = avg_opponent_score - my_score
                     tracker.flush_terminal(i, terminal_reward)
-                    if i == 0:  # Keep Player 0's score for TensorBoard tracking
+
+                    if i == 0:
                         tb_terminal_reward = terminal_reward
                 break
 
+            # round end
+            if state_id == 'round_end':
+                # Break the PBRS chain before the engine wipes the hands
+                tracker.flush_round_boundary()
+                engine.resolve_round_end()
+                continue
+
             if ctx.current_circuit >= ctx.config.max_turns:
-                # --- NEW: The FATAL Stalemate Penalty ---
                 stalemate_penalty = -500.0
                 for i in range(num_players):
                     tracker.flush_terminal(i, stalemate_penalty)
@@ -176,7 +269,6 @@ def run_rl_training(episodes=1000, temperature=1.5):
                 _log_stalemate_hands(ctx)
                 break
 
-            # ... (Dealing and Start Turn remain the same) ...
             if state_id == 'dealing':
                 engine.deal_cards()
                 continue
@@ -205,11 +297,20 @@ def run_rl_training(episodes=1000, temperature=1.5):
             )
 
             # --- NEW: ALL clones cache their data ---
-            current_phi = calculate_state_potential(ctx, active_idx,
-                                                    oracle_probs.squeeze(0).cpu().numpy())
+            my_hand_t = spatial_t[:, 0:1, :, :]
+
+            c_sets, c_runs = count_completed_objectives(ctx, active_idx)
+
+            current_phi = calculate_safe_potential(
+                my_hand=my_hand_t,
+                oracle_probs=oracle_probs,
+                completed_sets=c_sets,
+                completed_runs=c_runs
+            )
+
             truth_np = ctx.get_oracle_truth(active_idx)
             tracker.cache_step(
-                active_idx,  # Pass the specific player index
+                active_idx,
                 spatial_np.copy(),
                 scalar_np.copy(),
                 mask_np.copy(),

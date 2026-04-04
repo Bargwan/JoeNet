@@ -5,6 +5,7 @@ import onnxruntime as ort
 # Global cache to hold models in the multiprocessing worker's local RAM
 _global_onnx_sessions = {}
 
+
 class Agent:
     def select_action(self, state_id, ctx, player_idx, action_mask):
         raise NotImplementedError
@@ -20,32 +21,14 @@ class RandomAgent(Agent):
         return self.rng.choice(valid_actions)
 
 
-class LegacyHeuristicAgent(Agent):
+class HeuristicAgent(Agent):
     """
-    The strict baseline bot. Only picks up discards if they perfectly
-    complete the round objective or are playable on the table.
+    The unified 'Ruthless Closer' baseline bot.
+    Aggressively drafts partial melds, hoards key cards, and expands hand capacity late game.
     """
+
     def __init__(self, random_seed=None):
         self.rng = random.Random(random_seed)
-
-    def _calculate_go_down_probability(self, ctx, player_idx):
-        prob = 0.8  # (Or 0.8 if you kept the aggressive dial from earlier)
-
-        # --- Dynamic Round-Based Patience ---
-        # Base expectation is 8 turns for Round 1 (Index 0),
-        # scaling up to 14 turns for Round 7 (Index 6).
-        patience_threshold = 8.0 + ctx.current_round_idx
-        turn_pressure = ctx.current_circuit / patience_threshold
-        prob = max(prob, turn_pressure)
-
-        # (Opponent threat logic remains unchanged)
-        for i, p in enumerate(ctx.players):
-            if i != player_idx and getattr(p, 'is_down', False):
-                cards_left = len(p.hand_list)
-                opp_threat = 1.0 - (cards_left * 0.1)
-                prob = max(prob, opp_threat)
-
-        return min(1.0, prob)
 
     def select_action(self, state_id, ctx, player_idx, action_mask):
         player = ctx.players[player_idx] if ctx and ctx.players else None
@@ -56,16 +39,25 @@ class LegacyHeuristicAgent(Agent):
         if state_id == 'pickup_decision' and discard_top:
             is_down = getattr(player, 'is_down', False)
 
+            # 1. Key-Card Hoarding: If we have the objective but aren't down, grab playable cards
+            if action_mask[1] and not is_down and ctx.check_hand_objective(player_idx):
+                if self._is_playable_on_table(discard_top, ctx):
+                    return 1
+
+            # 2. Standard Pickup Logic
             if is_down:
                 if action_mask[1] and self._is_playable_on_table(discard_top, ctx):
                     return 1
                 elif action_mask[0]:
                     return 0
             else:
-                # LEGACY LOGIC: Strict objective completion only
-                if action_mask[1] and self._completes_objective(discard_top, player_idx, ctx):
-                    return 1
+                if action_mask[1]:
+                    if self._completes_objective(discard_top, player_idx, ctx):
+                        return 1
+                    elif self._is_useful_pickup(discard_top, player_idx, ctx):
+                        return 1
 
+            # 3. Fallback (Draw from stock)
             if action_mask[0]:
                 return 0
             elif action_mask[1]:
@@ -73,20 +65,30 @@ class LegacyHeuristicAgent(Agent):
 
         # --- Phase: MAY-I DECISION ---
         elif state_id == 'may_i_decision' and discard_top:
-            if action_mask[2] and self._completes_objective(discard_top, player_idx, ctx):
-                return 2
-            elif action_mask[3]:
+            if action_mask[2]:
+                # 1. Instantly advances meld progress
+                if self._completes_objective(discard_top, player_idx, ctx):
+                    return 2
+
+                # 2. Strategic Capacity Expansion for Late Rounds (3+)
+                if ctx.current_round_idx >= 3 and len(hand) <= 11:
+                    if self._is_useful_pickup(discard_top, player_idx, ctx):
+                        return 2
+
+            if action_mask[3]:
                 return 3
 
         # --- Phase: GO DOWN DECISION ---
         elif state_id == 'go_down_decision':
             if action_mask[4] and ctx.check_hand_objective(player_idx):
+                # Pragmatic Win: Go down if it leaves us with <= 5 penalty cards
+                if self._calculate_projected_deadwood(ctx, player_idx) <= 5:
+                    return 4
+
+                # Otherwise apply patience pressure
                 if action_mask[5]:
                     go_down_prob = self._calculate_go_down_probability(ctx, player_idx)
-                    if self.rng.random() <= go_down_prob:
-                        return 4  # GO_DOWN
-                    else:
-                        return 5  # WAIT
+                    return 4 if self.rng.random() <= go_down_prob else 5
                 return 4
             elif action_mask[5]:
                 return 5
@@ -104,26 +106,32 @@ class LegacyHeuristicAgent(Agent):
 
         # --- Phase: DISCARD DECISION ---
         elif state_id == 'discard_phase' and hand:
+            is_down = getattr(player, 'is_down', False)
+            req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+            base_progress = self._get_objective_progress(player.private_hand, req_sets, req_runs,
+                                                         ctx)
+
             best_discard_idx = -1
             lowest_synergy = float('inf')
-            is_down = getattr(player, 'is_down', False)
 
-            req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-            base_progress = self._get_objective_progress(player.private_hand, req_sets, req_runs, ctx)
+            # Activate the Gridlock Breaker slightly earlier (Circuit 15)
+            is_stuck = ctx.current_circuit > 15
 
             for card in hand:
                 action_idx = self._get_discard_action_idx(card)
-
                 if action_idx < len(action_mask) and action_mask[action_idx]:
-                    synergy = self._calculate_synergy(card, hand, ctx)
 
-                    if synergy > 0:
-                        if self._breaks_objective(card, player_idx, ctx, base_progress):
-                            synergy += 5000
+                    synergy = self._calculate_synergy(card, hand, ctx, player_idx)
 
-                    if is_down and self._is_playable_on_table(card, ctx):
-                        synergy += 1000
+                    # THE GRIDLOCK BREAKER (Entropy Injection)
+                    if is_stuck and 0 < synergy < 2000:
+                        synergy += self.rng.uniform(-40, 40)
 
+                    # Absolute Objective Immunity
+                    if not is_down and self._breaks_objective(card, player_idx, ctx, base_progress):
+                        synergy += 10000
+
+                    # Penalize high point values to dump heavy deadwood
                     deadwood_val = self._get_deadwood_value(card, ctx)
                     synergy -= (deadwood_val / 100.0)
 
@@ -140,6 +148,126 @@ class LegacyHeuristicAgent(Agent):
             return self.rng.choice(valid_actions)
         return -1
 
+    # ==========================================
+    # INTERNAL EVALUATION HELPERS
+    # ==========================================
+
+    def _is_useful_pickup(self, target_card, player_idx, ctx):
+        """Evaluates outstanding needs and prioritizes sequences/pairs accordingly."""
+        player = ctx.players[player_idx]
+        hand = player.hand_list
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+
+        has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
+        has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
+
+        needs_sets = (req_sets > 0) and not has_sets
+        needs_runs = (req_runs > 0) and not has_runs
+
+        if needs_runs and not needs_sets:
+            for card in hand:
+                if card.suit == target_card.suit and card.rank == target_card.rank:
+                    return False  # Refuse duplicate from discard for runs
+
+        run_synergy_found = False
+        set_synergy_found = False
+
+        for card in hand:
+            if needs_runs and card.suit == target_card.suit:
+                if 0 < abs(card.rank.value - target_card.rank.value) <= 2:
+                    run_synergy_found = True
+            if needs_sets and card.rank == target_card.rank:
+                set_synergy_found = True
+
+        if needs_runs and needs_sets:
+            if req_runs >= req_sets:
+                return run_synergy_found
+            return run_synergy_found or set_synergy_found
+        elif needs_runs:
+            return run_synergy_found
+        elif needs_sets:
+            return set_synergy_found
+
+        return False
+
+    def _calculate_synergy(self, target_card, hand_list, ctx, player_idx):
+        """Refined synergy that dynamically evaluates outstanding needs and Key Cards."""
+        player = ctx.players[player_idx]
+        has_objective = ctx.check_hand_objective(player_idx)
+        is_down = getattr(player, 'is_down', False)
+
+        # 1. Key Card Phase (Objective met or already down)
+        if has_objective or is_down:
+            if self._is_playable_on_table(target_card, ctx):
+                num_players = len(ctx.players)
+                next_player = ctx.players[(player_idx + 1) % num_players]
+                if getattr(next_player, 'is_down', False) and len(next_player.hand_list) <= 2:
+                    return 4000  # Radioactive
+                return 2000  # Standard Key Card
+            return 0  # Garbage if not a key card
+
+        # 2. Drafting Phase (Pre-Objective)
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
+        has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
+
+        needs_sets = (req_sets > 0) and not has_sets
+        needs_runs = (req_runs > 0) and not has_runs
+
+        if needs_runs and not needs_sets:
+            duplicate_count = sum(
+                1 for c in hand_list if c.suit == target_card.suit and c.rank == target_card.rank)
+            if duplicate_count > 1:
+                return -500  # Toxic deadwood
+
+        synergy = 0
+        for other in hand_list:
+            if other is target_card:
+                continue
+            if needs_sets and other.rank == target_card.rank:
+                synergy += 9
+            if needs_runs and other.suit == target_card.suit:
+                rank_diff = abs(other.rank.value - target_card.rank.value)
+                if 0 < rank_diff <= 2:
+                    synergy += 10
+
+        return int(synergy)
+
+    def _calculate_projected_deadwood(self, ctx, player_idx):
+        player = ctx.players[player_idx]
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+
+        success, ext_sets, ext_runs = ctx._search_melds(player.private_hand, req_sets, req_runs)
+        if not success:
+            return len(player.hand_list)
+
+        objective_tensor = ext_sets + ext_runs
+        remaining_count = 0
+
+        for card in player.hand_list:
+            suit, rank = int(card.suit), int(card.rank)
+            if objective_tensor[suit, rank] > 0:
+                objective_tensor[suit, rank] -= 1
+                continue
+            if self._is_playable_on_table(card, ctx):
+                continue
+            remaining_count += 1
+
+        return remaining_count
+
+    def _calculate_go_down_probability(self, ctx, player_idx):
+        prob = 0.8
+        patience_threshold = 8.0 + ctx.current_round_idx
+        turn_pressure = ctx.current_circuit / patience_threshold
+        prob = max(prob, turn_pressure)
+
+        for i, p in enumerate(ctx.players):
+            if i != player_idx and getattr(p, 'is_down', False):
+                cards_left = len(p.hand_list)
+                prob = max(prob, 1.0 - (cards_left * 0.1))
+
+        return min(1.0, prob)
+
     def _completes_objective(self, discard_card, player_idx, ctx):
         player = ctx.players[player_idx]
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
@@ -148,7 +276,6 @@ class LegacyHeuristicAgent(Agent):
             return False
 
         base_progress = self._get_objective_progress(player.private_hand, req_sets, req_runs, ctx)
-
         temp_tensor = player.private_hand.copy()
         suit, rank = discard_card.suit.value, discard_card.rank.value
         ctx._sync_ace(temp_tensor, suit, rank, increment=True)
@@ -159,7 +286,6 @@ class LegacyHeuristicAgent(Agent):
     def _breaks_objective(self, candidate_card, player_idx, ctx, base_progress):
         if base_progress == 0:
             return False
-
         player = ctx.players[player_idx]
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
@@ -185,26 +311,7 @@ class LegacyHeuristicAgent(Agent):
             return ctx.config.points_ace
         elif 7 <= rank_val <= 12:
             return ctx.config.points_eight_to_king
-        else:
-            return ctx.config.points_two_to_seven
-
-    def _calculate_synergy(self, target_card, hand_list, ctx):
-        synergy = 0
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-
-        for other in hand_list:
-            if other is target_card:
-                continue
-
-            if req_sets > 0 and other.rank == target_card.rank:
-                synergy += 9
-
-            elif req_runs > 0 and other.suit == target_card.suit:
-                rank_diff = abs(other.rank.value - target_card.rank.value)
-                if 0 < rank_diff <= 2:
-                    synergy += 10
-
-        return synergy
+        return ctx.config.points_two_to_seven
 
     def _is_playable_on_table(self, card, ctx):
         suit, rank = int(card.suit), int(card.rank)
@@ -218,341 +325,537 @@ class LegacyHeuristicAgent(Agent):
         return (card.suit.value * 13) + card.rank.value + 6
 
 
-class HeuristicAgent(LegacyHeuristicAgent):
+class OpenHandAgent(HeuristicAgent):
     """
-    The upgraded Option B bot. Inherits all logic from the Legacy bot,
-    but overrides the pickup phase to aggressively grab partial melds and 1-gaps.
+    A Phase 1 Data Generator that plays with 'open hands'.
+    Uses Edge-Detection Tensor Math to evaluate the true lifespan of
+    connected clusters, and never hallucinates its own cards.
     """
-    def select_action(self, state_id, ctx, player_idx, action_mask):
-        # We only want to intercept the pickup decision.
-        # All other decisions fall back to the Legacy logic.
-        if state_id == 'pickup_decision':
-            player = ctx.players[player_idx] if ctx and ctx.players else None
-            hand = player.hand_list if player else []
-            discard_top = ctx.discard_pile[-1] if ctx and ctx.discard_pile else None
 
-            if discard_top:
-                is_down = getattr(player, 'is_down', False)
-
-                if is_down:
-                    if action_mask[1] and self._is_playable_on_table(discard_top, ctx):
-                        return 1
-                    elif action_mask[0]:
-                        return 0
-                else:
-                    # NEW LOGIC (Option B): Accept cards that complete objectives OR extend partials/gaps
-                    if action_mask[1]:
-                        if self._completes_objective(discard_top, player_idx, ctx):
-                            return 1
-                        elif self._is_useful_pickup(discard_top, player_idx,
-                                                    ctx):  # <-- New signature
-                            return 1
-
-                # Fallback (usually draw from stock)
-                if action_mask[0]:
-                    return 0
-                elif action_mask[1]:
-                    return 1
-
-        # If it's not a pickup decision, use the exact same logic as the Legacy bot
-        return super().select_action(state_id, ctx, player_idx, action_mask)
-
-    def _is_useful_pickup(self, target_card, player_idx, ctx):
-        """
-        Option B (Fuzzy/Gapped): Checks if a card provides immediate
-        synergy to the current hand based on the round's objective.
-        """
-        hand_list = ctx.players[player_idx].hand_list
+    def _get_card_availability(self, suit, rank, ctx, player_idx):
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        num_players = len(ctx.players)
+        upstream_idx = (player_idx - 1) % num_players
 
-        for card in hand_list:
-            # Set Synergy: Needs to match rank
-            if req_sets > 0 and card.rank == target_card.rank:
-                return True
+        deck_size = max(1.0, float(len(ctx.deck)))
+        stock_density = 60.0 / deck_size
 
-            # Run Synergy: Needs to be same suit and within a rank distance of 2 (allows 1-gaps)
-            if req_runs > 0 and card.suit == target_card.suit:
-                rank_diff = abs(card.rank.value - target_card.rank.value)
-                if 0 < rank_diff <= 2:
-                    return True
+        total_weight = 2.0 * stock_density
 
-        return False
+        table_count = ctx.table_sets[suit, rank] + ctx.table_runs[suit, rank]
+        total_weight -= (table_count * stock_density)
 
-class OptionAAgent(HeuristicAgent):
-    """
-    The Strict Partial Bot.
-    Accepts contiguous partials (rank distance == 1). Strictly ignores 1-gaps.
-    """
-    def _is_useful_pickup(self, target_card, player_idx, ctx):
-        hand_list = ctx.players[player_idx].hand_list
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        dead_count = ctx.dead_cards[suit, rank]
+        total_weight -= (dead_count * stock_density)
 
-        for card in hand_list:
-            if req_sets > 0 and card.rank == target_card.rank:
-                return True
+        if deck_size < 15 and dead_count > 0:
+            total_weight += (dead_count * 0.2)
 
-            if req_runs > 0 and card.suit == target_card.suit:
-                rank_diff = abs(card.rank.value - target_card.rank.value)
-                if rank_diff == 1:  # <--- OPTION A: Strict adjacency only!
-                    return True
+        # FIX 1: DEDUCT OUR OWN HAND! (Cures the Hallucination)
+        my_held = ctx.players[player_idx].private_hand[suit, rank]
+        total_weight -= (my_held * stock_density)
 
-        return False
+        for i, opp in enumerate(ctx.players):
+            if i == player_idx: continue
 
+            held_count = opp.private_hand[suit, rank]
+            is_building = False
 
-class KeyCardAwareHeuristicAgent(HeuristicAgent):
-    """
-    The 'Ruthless Closer' Bot.
-    Identifies instant-win scenarios and protects cards that can be
-    played on the table (Key Cards) even after the objective is met.
-    """
+            if req_sets > 0 and np.sum(opp.private_hand[:, rank]) >= 2:
+                is_building = True
 
-    def _is_useful_pickup(self, target_card, player_idx, ctx):
-        """
-        Dynamic Run-Biased Pickup:
-        Evaluates the outstanding needs of the hand and strictly prioritizes sequences
-        if Runs are still missing, while ignoring synergies for already-completed objectives.
-        """
+            if req_runs > 0 and not is_building:
+                min_idx = max(0, rank - 2)
+                max_idx = min(14, rank + 3)
+                if np.sum(opp.private_hand[suit, min_idx:max_idx]) >= 2:
+                    is_building = True
+
+            if held_count > 0:
+                total_weight -= (held_count * stock_density)
+                for _ in range(held_count):
+                    if is_building:
+                        total_weight += 0.0
+                    elif i == upstream_idx:
+                        total_weight += 2.0
+                    else:
+                        total_weight += 0.5
+            else:
+                if is_building:
+                    total_weight -= (1.0 * stock_density)
+
+        return max(0.0, total_weight)
+
+    def _calculate_synergy(self, target_card, hand_list, ctx, player_idx):
         player = ctx.players[player_idx]
-        hand = player.hand_list
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        has_objective = ctx.check_hand_objective(player_idx)
+        is_down = getattr(player, 'is_down', False)
 
-        # 1. Pulse Check: What do we ACTUALLY still need?
-        # We test the hand against the set and run requirements independently.
+        if has_objective or is_down:
+            if self._is_playable_on_table(target_card, ctx):
+                next_player_idx = (player_idx + 1) % len(ctx.players)
+                for i, opp in enumerate(ctx.players):
+                    if i == player_idx: continue
+                    if getattr(opp, 'is_down', False) and len(opp.hand_list) <= 2:
+                        may_is_left = getattr(opp, 'may_is', 0)
+                        if i == next_player_idx or may_is_left > 0:
+                            return 5000
+                return 2000
+            return 0
+
+            # 1. Grab the mathematically proven baseline structure value
+        base_synergy = super()._calculate_synergy(target_card, hand_list, ctx, player_idx)
+
+        # If the baseline sees this as deadwood or a toxic duplicate (<= 0), don't waste time
+        if base_synergy <= 0:
+            return int(base_synergy)
+
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
         has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
         has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
 
         needs_sets = (req_sets > 0) and not has_sets
         needs_runs = (req_runs > 0) and not has_runs
 
-        if needs_runs and not needs_sets:
-            for card in hand:
-                if card.suit == target_card.suit and card.rank == target_card.rank:
-                    return False  # Refuse to pick up duplicate from the discard for runs
+        suit = target_card.suit.value
+        rank = target_card.rank.value
 
-        run_synergy_found = False
-        set_synergy_found = False
+        final_synergy = float(base_synergy)
+        is_dead = True
 
-        # 2. Scan the hand only for the synergies we actually need
-        for card in hand:
-            if needs_runs and card.suit == target_card.suit:
-                if 0 < abs(card.rank.value - target_card.rank.value) <= 2:
-                    run_synergy_found = True
+        # 2. Evaluate SETS Fertility
+        if needs_sets:
+            # Check current cluster size (including the target card)
+            matches_in_hand = sum(1 for c in hand_list if c.rank == rank and c is not target_card)
+            cluster_size = matches_in_hand + 1
 
-            if needs_sets and card.rank == target_card.rank:
-                set_synergy_found = True
+            outs = 0
+            for s in range(4):
+                outs += self._get_card_availability(s, rank, ctx, player_idx)
 
-        # 3. Dynamic Prioritization
-        if needs_runs and needs_sets:
-            # We need both. Are runs the heavier requirement? Prioritize them.
-            if req_runs >= req_sets:
-                return run_synergy_found
-            return run_synergy_found or set_synergy_found
+            if cluster_size >= 3:
+                is_dead = False
+                final_synergy += 500  # Immunity: Completed Set!
+            elif outs > 0:
+                is_dead = False
+                final_synergy += (outs * 5.0)
 
-        elif needs_runs:
-            # We only need runs. Completely blind the bot to pairs.
-            return run_synergy_found
+        # 3. Evaluate RUNS Fertility (Contiguous Edge Detection)
+        if needs_runs:
+            # Trace the tensor to find the actual physical boundaries
+            left_edge = rank
+            while left_edge > 0 and player.private_hand[suit, left_edge - 1] > 0:
+                left_edge -= 1
 
-        elif needs_sets:
-            # We only need sets. Completely blind the bot to sequences.
-            return set_synergy_found
+            right_edge = rank
+            while right_edge < 13 and player.private_hand[suit, right_edge + 1] > 0:
+                right_edge += 1
 
-        return False
+            cluster_size = right_edge - left_edge + 1
+
+            outs = 0
+            if left_edge > 0:
+                outs += self._get_card_availability(suit, left_edge - 1, ctx, player_idx)
+            if right_edge < 13:
+                outs += self._get_card_availability(suit, right_edge + 1, ctx, player_idx)
+
+            if cluster_size >= 4:
+                is_dead = False
+                final_synergy += 500  # Immunity: Completed Run!
+            elif outs > 0:
+                is_dead = False
+                final_synergy += (outs * 5.0)
+
+        # 4. Risk-Adjusted Aversion (Fatality by Fertility Fix)
+        # We offset the fertility bonus by the card's heavy penalty weight
+        deadwood_val = self._get_deadwood_value(target_card, ctx)
+        final_synergy -= (deadwood_val * 0.5)
+
+        # 5. The True Veto: If it has 0 physical outs and isn't a completed meld, it's dead.
+        if is_dead:
+            return 0
+
+        return int(final_synergy)
+
+    def _is_useful_pickup(self, target_card, player_idx, ctx):
+        is_useful = super()._is_useful_pickup(target_card, player_idx, ctx)
+        if not is_useful:
+            return False
+
+        player = ctx.players[player_idx]
+        expected_synergy = self._calculate_synergy(target_card, player.hand_list, ctx, player_idx)
+
+        if expected_synergy <= 0:
+            return False
+
+        return True
+
+
+class ProbabilisticAgent(HeuristicAgent):
+    # Static (4, 14) tensor mapping the penalty values of every card.
+    # Divided by 100 directly here so we don't have to do it during evaluation.
+    # Note: Index 13 (High Ace) is 0 to prevent double-counting with Index 0 (Low Ace).
+
+    def _get_penalty_weights(self, ctx):
+        """Generates and caches the penalty weight tensor from the dynamic config."""
+        if not hasattr(self, '_cached_penalty_weights'):
+            weights = np.zeros((4, 14), dtype=np.float32)
+            # Divide by 100 here to save operations during the evaluation loop
+            weights[:, 0] = ctx.config.points_ace / 100.0
+            weights[:, 1:7] = ctx.config.points_two_to_seven / 100.0
+            weights[:, 7:13] = ctx.config.points_eight_to_king / 100.0
+            self._cached_penalty_weights = weights
+
+        return self._cached_penalty_weights
+
+    def _get_draw_probability(self, required, available, unknown_cards, horizon=15):
+        """
+        Calculates the true probability (0.0 to 1.0) of drawing 'required' copies
+        of a card given 'available' copies in an 'unknown_cards' deck.
+        """
+        if required == 0: return 1.0
+        if available < required: return 0.0
+        if unknown_cards <= 0: return 0.0
+
+        # Chance to NOT draw a specific card in 1 draw
+        p_miss_single = max(0.0, (unknown_cards - available) / unknown_cards)
+
+        # Chance to NOT draw it over the entire horizon
+        p_miss_all = p_miss_single ** horizon
+
+        # Chance to draw AT LEAST 1 copy
+        p_hit_at_least_one = 1.0 - p_miss_all
+
+        # If we need multiple copies, we multiply the probabilities.
+        return p_hit_at_least_one ** required
+
+    def _get_expected_stock_value(self, ctx, hand_tensor, player_idx):
+        """Calculates the literal average point value of all unknown cards."""
+        available = self._get_available_tensor(ctx, hand_tensor, player_idx)
+        weights = self._get_penalty_weights(ctx)
+
+        total_unknown_cards = np.sum(available)
+        if total_unknown_cards == 0:
+            return 8.46  # Fallback to theoretical average if deck is empty
+
+        # (Sum of all remaining points) / (Number of remaining cards)
+        # Weights are already divided by 100, so we multiply by 100 to get points
+        avg_points = (np.sum(available * weights) / total_unknown_cards) * 100.0
+        return avg_points
+
+    def _evaluate_hand_state(self, hand_tensor, ctx, player_idx):
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        all_seeds = self._parse_all_valid_seeds(hand_tensor, req_sets, req_runs)
+
+        # 1. Get True Probabilities
+        for seed in all_seeds:
+            seed['ev'] = self._calculate_seed_probability(seed, ctx, hand_tensor, player_idx)
+
+        all_seeds.sort(key=lambda x: x['ev'], reverse=True)
+
+        slotted_sets_p = []
+        slotted_runs_p = []
+        slotted_mask = np.zeros((4, 14), dtype=np.int8)
+        working_hand = hand_tensor.copy()
+
+        # 2. Strict Consumption Slotting (Unchanged)
+        for seed in all_seeds:
+            if seed['type'] == 'set' and len(slotted_sets_p) < req_sets:
+                target_rank = seed['target_rank']
+                actual_held = np.sum(working_hand[:, target_rank])
+                if actual_held > 0:
+                    slotted_sets_p.append(seed['ev'])
+                    cards_to_consume = min(3, int(actual_held))
+                    consumed = 0
+                    for s in range(4):
+                        while working_hand[s, target_rank] > 0 and consumed < cards_to_consume:
+                            working_hand[s, target_rank] -= 1
+                            slotted_mask[s, target_rank] += 1
+                            consumed += 1
+
+            elif seed['type'] == 'run' and len(slotted_runs_p) < req_runs:
+                suit = seed['suit']
+                start = seed['target_window_start']
+                window = working_hand[suit, start:start + 4]
+                actual_held = np.count_nonzero(window)
+                if actual_held > 0:
+                    slotted_runs_p.append(seed['ev'])
+                    for i in range(4):
+                        if working_hand[suit, start + i] > 0:
+                            working_hand[suit, start + i] -= 1
+                            slotted_mask[suit, start + i] += 1
+
+        # 3. Multiplicative Win Probability (0.0 to 1.0)
+        p_sets = np.prod(slotted_sets_p) if slotted_sets_p else 0.01
+        p_runs = np.prod(slotted_runs_p) if slotted_runs_p else 0.01
+        p_win = p_sets * p_runs
+
+        # If an Ace was consumed at either Index 0 or 13, ensure both indices reflect it
+        ace_max = np.maximum(slotted_mask[:, 0], slotted_mask[:, 13])
+        slotted_mask[:, 0] = ace_max
+        slotted_mask[:, 13] = ace_max
+
+        # 4. REAL POINT CALCULATIONS
+        penalty_weights = self._get_penalty_weights(ctx)
+
+        # Calculate literal point values of our hand
+        total_hand_points = np.sum(hand_tensor * penalty_weights) * 100.0
+
+        deadwood_tensor = np.clip(hand_tensor - slotted_mask, 0, None)
+        deadwood_points = np.sum(deadwood_tensor * penalty_weights) * 100.0
+
+        # 5. THE TRUE PROBABILISTIC VICTORY REWARD
+        available_tensor = self._get_available_tensor(ctx, hand_tensor, player_idx)
+        unknown_deck_size = float(np.sum(available_tensor))
+        unknown_deck_points = np.sum(available_tensor * penalty_weights) * 100.0
+
+        avg_unknown_card_val = unknown_deck_points / max(1.0, unknown_deck_size)
+
+        opponents_expected_penalty = 0.0
+        for i, opp in enumerate(ctx.players):
+            if i != player_idx:
+                # Calculate known cards physically tracked into their hand
+                # np.clip prevents negative values if they discard a card they were dealt initially
+                known_held_tensor = np.clip(
+                    ctx.player_pickup_counts[i] - ctx.player_discard_counts[i], 0, None)
+
+                # Count how many public cards we mathematically think they are holding
+                total_known_cards = float(np.sum(known_held_tensor))
+
+                # Edge case safeguard: If they went "down", they played cards to the table.
+                # If our known count exceeds their physical hand size, fallback to average
+                # to prevent overestimating their penalty damage.
+                if total_known_cards > len(opp.hand_list):
+                    opponents_expected_penalty += len(opp.hand_list) * avg_unknown_card_val
+                else:
+                    # Calculate exact points for the cards we KNOW they hold
+                    known_points = np.sum(known_held_tensor * penalty_weights) * 100.0
+
+                    # Calculate average points for the rest of their hidden hand
+                    num_unknown_cards = float(len(opp.hand_list)) - total_known_cards
+                    unknown_points = num_unknown_cards * avg_unknown_card_val
+
+                    opponents_expected_penalty += (known_points + unknown_points)
+
+        # 6. THE RELATIVE MASTER EQUATION
+        # True Expected Value = (Points we expect to inflict) - (Points we expect to take)
+        expected_value = (p_win * opponents_expected_penalty) - (
+                    (1.0 - p_win) * total_hand_points) - (p_win * deadwood_points)
+
+        return expected_value
+
+    def _parse_all_valid_seeds(self, hand_tensor, req_sets, req_runs):
+        """
+        Scans the (4, 14) hand tensor to find valid structural seeds.
+        Returns a list of dictionaries containing seed metrics.
+        """
+        seeds = []
+
+        # ==========================================
+        # 1. PARSE SET SEEDS
+        # ==========================================
+        if req_sets > 0:
+            # Sum across all 4 suits to get the total count of each rank
+            rank_counts = np.sum(hand_tensor, axis=0)
+
+            # Iterate 1 to 13 (Ignoring 0 so we don't double-count the Ace)
+            for rank in range(1, 14):
+                held_count = rank_counts[rank]
+                if held_count > 0:
+                    distance = max(0, 3 - held_count)
+                    seeds.append({
+                        'type': 'set',
+                        'distance': distance,
+                        'target_rank': rank,
+                        'held_count': held_count
+                    })
+
+        # ==========================================
+        # 2. PARSE RUN SEEDS (NumPy Sliding Window)
+        # ==========================================
+        if req_runs > 0:
+            for suit in range(4):
+                # 11 valid windows: indices 0-3, 1-4, ... 10-13
+                for start_idx in range(11):
+                    # Slice the 4-card window directly from the tensor
+                    window = hand_tensor[suit, start_idx:start_idx + 4]
+
+                    # np.count_nonzero perfectly ignores duplicate cards of the same rank!
+                    held_unique_ranks = np.count_nonzero(window)
+
+                    if held_unique_ranks > 0:
+                        distance = 4 - held_unique_ranks
+
+                        # Find exactly which indices in the window are 0 (missing)
+                        missing_offsets = np.where(window == 0)[0]
+                        missing_ranks = [start_idx + offset for offset in missing_offsets]
+
+                        seeds.append({
+                            'type': 'run',
+                            'distance': distance,
+                            'suit': suit,
+                            'target_window_start': start_idx,  # Maps to rank (0 = Ace Low)
+                            'missing_ranks': missing_ranks,
+                            'held_unique_ranks': held_unique_ranks
+                        })
+
+        return seeds
+
+    def _get_available_tensor(self, ctx, hand_tensor, player_idx):
+        """
+        Creates a (4, 14) matrix representing all cards physically left to draw.
+        Integrates public opponent pickups to prevent hallucinating dead outs.
+        """
+        # 1. Start with the globally visible cards and our own hand
+        known_tensor = (ctx.table_sets +
+                        ctx.table_runs +
+                        ctx.dead_cards +
+                        hand_tensor).copy()
+
+        # 2. Add the cards we KNOW opponents are holding
+        for i in range(len(ctx.players)):
+            if i != player_idx:
+                # Calculate exactly what they've picked up minus what they've discarded
+                known_held = np.clip(ctx.player_pickup_counts[i] - ctx.player_discard_counts[i], 0,
+                                     None)
+                known_tensor += known_held
+
+        # 3. Double deck means max 2 of any specific card (Suit + Rank)
+        # np.clip ensures we don't drop below 0 if matrix math gets weird
+        return np.clip(2 - known_tensor, 0, 2)
+
+    def _calculate_seed_probability(self, seed, ctx, hand_tensor, player_idx):
+        """Returns a strict 0.0 to 1.0 probability of completing this seed."""
+        if seed['distance'] == 0:
+            return 1.0
+
+            # --- PASS player_idx HERE ---
+        available_tensor = self._get_available_tensor(ctx, hand_tensor, player_idx)
+        unknown_deck_size = float(np.sum(available_tensor[:, 0:13]))
+
+        if seed['type'] == 'set':
+            target_rank = seed['target_rank']
+            live_draws = float(np.sum(available_tensor[:, target_rank]))
+            return self._get_draw_probability(seed['distance'], live_draws, unknown_deck_size)
+
+        elif seed['type'] == 'run':
+            suit = seed['suit']
+            p_run = 1.0
+
+            for missing_rank in seed['missing_ranks']:
+                specific_draws = float(available_tensor[suit, missing_rank])
+                p_hole = self._get_draw_probability(1, specific_draws, unknown_deck_size)
+                p_run *= p_hole
+
+            return p_run
+
+        return 0.0
 
     def select_action(self, state_id, ctx, player_idx, action_mask):
-        # --- PHASE: PICKUP DECISION (Key-Card Hoarding) ---
-        if state_id == 'pickup_decision':
-            player = ctx.players[player_idx]
-            discard_top = ctx.discard_pile[-1] if ctx.discard_pile else None
+        """
+        Overrides the Heuristic Action Selection with a 1-Ply Stochastic Lookahead.
+        Now uses True Probability & Expected Penalty Points.
+        """
+        player = ctx.players[player_idx]
+        hand_tensor = player.private_hand
+        discard_top = ctx.discard_pile[-1] if ctx.discard_pile else None
 
-            if discard_top and action_mask[1]:
-                is_down = getattr(player, 'is_down', False)
-
-                # THE FIX: If we have the objective but aren't down yet,
-                # aggressively snatch any cards we know we can play on the table later!
-                if not is_down and ctx.check_hand_objective(player_idx):
-                    if self._is_playable_on_table(discard_top, ctx):
-                        return 1  # PICK_DISCARD
-
-            # If not a Key Card hoarding scenario, fall through to standard pickup logic
-            # (which handles completing objectives and picking up partials).
-
-        # --- PHASE: MAY-I DECISION (Strategic Capacity Expansion) ---
-        elif state_id == 'may_i_decision':
-            discard_top = ctx.discard_pile[-1] if ctx.discard_pile else None
-
-            if discard_top and action_mask[2]:
-                player = ctx.players[player_idx]
-
-                # 1. Legacy Behavior: Does it instantly advance a meld progress?
-                if self._completes_objective(discard_top, player_idx, ctx):
-                    return 2  # MAY_I
-
-                # 2. THE FIX: Hand Expansion for Late Rounds
-                # In Rounds 4-7 (index 3+), objectives require 10-12 cards.
-                # If we haven't May-I'd yet (hand size is still baseline 11)...
-                if ctx.current_round_idx >= 3 and len(player.hand_list) <= 11:
-                    # Use our Pulse Check! If it's a valuable sequence piece, take the penalty!
-                    if self._is_useful_pickup(discard_top, player_idx, ctx):
-                        return 2  # MAY_I
-
-            # Otherwise, decline
-            if action_mask[3]:
-                return 3
-
-        # --- PHASE: GO DOWN DECISION ---
-        elif state_id == 'go_down_decision':
-            if action_mask[4] and ctx.check_hand_objective(player_idx):
-
-                # --- THE MISSING FIX: Relax to a 'Pragmatic Win' ---
-                # Change this from <= 1 to <= 5
-                if self._calculate_projected_deadwood(ctx, player_idx) <= 5:
-                    return 4  # GO_DOWN
-
-                # Otherwise, use the standard patience/pressure logic
-                if action_mask[5]:
-                    go_down_prob = self._calculate_go_down_probability(ctx, player_idx)
-                    return 4 if self.rng.random() <= go_down_prob else 5
-                return 4
-
-        # --- PHASE: DISCARD DECISION (Key-Card Awareness) ---
-        elif state_id == 'discard_phase':
-            player = ctx.players[player_idx]
-            hand = player.hand_list
-            is_down = getattr(player, 'is_down', False)
-            req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-            base_progress = self._get_objective_progress(player.private_hand, req_sets,
-                                                         req_runs, ctx)
-
+        # ==========================================
+        # 1. PREDATORY DISCARD (1-Ply Lookahead)
+        # ==========================================
+        if state_id == 'discard_phase':
             best_discard_idx = -1
-            lowest_synergy = float('inf')
+            best_future_ev = -float('inf')
 
-            # --- THE FIX: Detect Gridlock ---
-            # If we've been circling the drain for 15 turns, panic.
-            is_stuck = ctx.current_circuit > 20
-
-            for card in hand:
+            # Simulate the future for every legally discardable card
+            for card in player.hand_list:
                 action_idx = self._get_discard_action_idx(card)
                 if action_idx < len(action_mask) and action_mask[action_idx]:
 
-                    synergy = self._calculate_synergy_smart(card, hand, ctx, player_idx)
+                    # Create the hypothetical future (Hand MINUS this card)
+                    hypo_tensor = hand_tensor.copy()
+                    suit, rank = int(card.suit), int(card.rank)
+                    ctx._sync_ace(hypo_tensor, suit, rank, increment=False)
 
-                    # --- THE FIX: Tiered Synergy Decay ---
-                    # Only decay normal hoarded cards (synergy < 2000).
-                    # Key Cards (2000) and Radioactive Cards (4000) are immune to decay!
-                    if is_stuck and synergy > 0 and synergy < 2000:
-                        synergy *= 0.1
+                    # Ask the EV Engine how good this resulting hand is
+                    future_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx)
 
-                    # --- THE FIX: Absolute Objective Immunity ---
-                    # We boost this from 5000 to 10000.
-                    # This guarantees the bot will ALWAYS discard a Key Card (2000 or 4000)
-                    # before it ever breaks its own objective (10000+).
-                    if not is_down and self._breaks_objective(card, player_idx, ctx, base_progress):
-                        synergy += 10000
-
-                    # Penalize high point values to encourage dumping high cards
-                    deadwood_val = self._get_deadwood_value(card, ctx)
-                    synergy -= (deadwood_val / 100.0)
-
-                    if synergy < lowest_synergy:
-                        lowest_synergy = synergy
+                    if future_ev > best_future_ev:
+                        best_future_ev = future_ev
                         best_discard_idx = action_idx
 
             if best_discard_idx != -1:
                 return best_discard_idx
 
-        # Fall back to standard HeuristicAgent for anything not explicitly overridden
+        # ==========================================
+        # 2. PICKUP DECISION (Full Turn Lookahead)
+        # ==========================================
+        elif state_id == 'pickup_decision' and discard_top:
+            if action_mask[1]:
+                baseline_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
+
+                # Step 1: Simulate the Pickup
+                hypo_tensor = hand_tensor.copy()
+                suit, rank = int(discard_top.suit), int(discard_top.rank)
+                ctx._sync_ace(hypo_tensor, suit, rank, increment=True)
+
+                # Step 2: Simulate the Mandatory Discard
+                best_post_discard_ev = -float('inf')
+
+                # Scan the hypothetical hand and simulate dropping every available card
+                for s in range(4):
+                    for r in range(1, 14):
+                        if hypo_tensor[s, r] > 0:
+                            post_discard_tensor = hypo_tensor.copy()
+                            ctx._sync_ace(post_discard_tensor, s, r, increment=False)
+
+                            ev = self._evaluate_hand_state(post_discard_tensor, ctx, player_idx)
+                            if ev > best_post_discard_ev:
+                                best_post_discard_ev = ev
+
+                # THE UPDATE: We are now dealing in literal Penalty Points.
+                # Only pick up the discard if it statistically saves us at least 1 overall point.
+                if best_post_discard_ev > baseline_ev + 1.0:
+                    return 1
+
+            if action_mask[0]:
+                return 0
+
+        # ==========================================
+        # 3. MAY-I DECISION (The Expansion Valve)
+        # ==========================================
+        elif state_id == 'may_i_decision' and discard_top and action_mask[2]:
+            baseline_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
+
+            # Step 1: Simulate the pickup of the targeted discard
+            hypo_tensor = hand_tensor.copy()
+            suit, rank = int(discard_top.suit), int(discard_top.rank)
+            ctx._sync_ace(hypo_tensor, suit, rank, increment=True)
+
+            # Step 2: Ask the EV engine how much better the hand becomes with that card
+            # (Note: May-I doesn't force a discard yet, so we don't simulate a discard here)
+            pickup_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx)
+
+            # Step 3: DYNAMIC RISK ASSESSMENT
+            # Calculate the literal expected debt of the random penalty card from the stock
+            # Inside the 'may_i_decision' block in select_action:
+            expected_penalty_damage = self._get_expected_stock_value(ctx, hand_tensor, player_idx)
+
+            # Step 4: Decision Logic
+            # Only May-I if the hand improvement pays off the literal
+            # expected debt of the random card + a 5-point margin for round-end risk.
+            if (pickup_ev - expected_penalty_damage) > baseline_ev + 5.0:
+                return 2
+
+            if action_mask[3]:
+                return 3
+
+        # ==========================================
+        # 4. FALLBACK (Going Down & Table Play)
+        # ==========================================
+        # Let the base HeuristicAgent handle going down and playing on table melds,
+        # as those are strictly rule-bound actions that don't require EV simulation.
         return super().select_action(state_id, ctx, player_idx, action_mask)
 
-    def _calculate_synergy_smart(self, target_card, hand_list, ctx, player_idx):
-        """Refined synergy that dynamically evaluates outstanding needs."""
-        player = ctx.players[player_idx]
-        has_objective = ctx.check_hand_objective(player_idx)
-        is_down = getattr(player, 'is_down', False)
-
-        # 1. Are we ready to play on the table? (Objective met OR already down)
-        if has_objective or is_down:
-            # ONLY hoard Key Cards if we are actually in a position to use them
-            if self._is_playable_on_table(target_card, ctx):
-                num_players = len(ctx.players)
-                next_player = ctx.players[(player_idx + 1) % num_players]
-
-                # If the next player is down and has 1 or 2 cards left, this card is RADIOACTIVE.
-                if getattr(next_player, 'is_down', False) and len(next_player.hand_list) <= 2:
-                    return 4000
-                return 2000  # Standard Key Card
-
-            # If it's NOT a key card, and we have our objective/are down, it's garbage
-            return 0
-
-            # 2. --- Outstanding-Aware Pulse Check (Pre-Objective) ---
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-
-        # What do we actually still need?
-        has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
-        has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
-
-        needs_sets = (req_sets > 0) and not has_sets
-        needs_runs = (req_runs > 0) and not has_runs
-
-        # --- Object-Identity Safe Duplicate Purge ---
-        if needs_runs and not needs_sets:
-            # Count how many of this exact logical card exist in the hand
-            duplicate_count = sum(
-                1 for c in hand_list if c.suit == target_card.suit and c.rank == target_card.rank)
-
-            # If there's more than one, both copies become toxic deadwood
-            if duplicate_count > 1:
-                return -500
-
-        synergy = 0
-
-        # 4. Only assign synergy to the meld types we are actively missing
-        for other in hand_list:
-            if other is target_card:
-                continue
-
-            # Only hoard pairs if we STILL need Sets
-            if needs_sets and other.rank == target_card.rank:
-                synergy += 9
-
-            # Only hoard sequences if we STILL need Runs
-            if needs_runs and other.suit == target_card.suit:
-                rank_diff = abs(other.rank.value - target_card.rank.value)
-                if 0 < rank_diff <= 2:
-                    synergy += 10
-
-        return synergy
-
-    def _calculate_projected_deadwood(self, ctx, player_idx):
-        """Simulates the table extension phase to see how many cards will remain in hand."""
-        player = ctx.players[player_idx]
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-
-        # Search for the cards that would be consumed by the 'Go Down' action
-        success, ext_sets, ext_runs = ctx._search_melds(player.private_hand, req_sets, req_runs)
-        if not success:
-            return len(player.hand_list)
-
-        # Calculate what's left after the objective is placed on the table
-        objective_tensor = ext_sets + ext_runs
-        remaining_count = 0
-
-        for card in player.hand_list:
-            suit, rank = int(card.suit), int(card.rank)
-
-            # If this card is part of the objective, it's gone
-            if objective_tensor[suit, rank] > 0:
-                objective_tensor[suit, rank] -= 1
-                continue
-
-            # If it's a key card for the table, it will be played (it's gone)
-            if self._is_playable_on_table(card, ctx):
-                continue
-
-            # Otherwise, it stays in hand as penalty points
-            remaining_count += 1
-
-        return remaining_count
 
 class ONNXAgent(Agent):
     """

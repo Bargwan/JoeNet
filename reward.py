@@ -6,34 +6,12 @@ from cards import Card
 
 class RewardCalculator:
     """
-    Calculates State Potential (Phi) based on the structural distance
-    to the current round objective.
+    Mechanical helper for identifying valid meld combinations.
+    (All PBRS and Zero-Sum math is now handled natively in train_rl.py)
     """
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
-        # The 'Exchange Rate' between cards and penalty points.
-        # Set to 25.0 based on the average value of an Ace/Face card combo.
-        self.win_hunger = 25.0
-
-    def calculate_distance_to_win(self, player_idx: int) -> int:
-        """
-        Calculates how many more cards are needed to fulfill the round objective.
-        A 'partial' (e.g., a pair or 2-card run) reduces distance.
-        """
-        player = self.ctx.players[player_idx]
-
-        # Translate the objective_map tuple (e.g., (2, 0)) into a list of slot sizes (e.g., [3, 3])
-        req_sets, req_runs = self.ctx.config.objective_map[self.ctx.current_round_idx]
-        objective = [3] * req_sets + [4] * req_runs
-
-        # Total cards required for this round (e.g., [3, 3] = 6)
-        total_required = sum(objective)
-
-        # Find the best allocation of current hand cards into the objective slots
-        cards_found = self._find_max_objective_cards(player.hand_list, objective)
-
-        return max(0, total_required - cards_found)
 
     def calculate_state_potential(self, player_idx: int, oracle_probs: np.ndarray = None) -> float:
         """
@@ -159,19 +137,22 @@ class RewardCalculator:
         ranks = {}
         for c in hand:
             ranks[c.rank] = ranks.get(c.rank, 0) + 1
+
         # Returns list of card counts for every rank where we have at least a pair
         return [count for count in ranks.values() if count >= 2]
 
-    def _get_potential_runs(self, hand):
-        # Simplification: Find sequences of same suit >= 2 cards
+    def _get_potential_runs(self, hand: List[Card]) -> List[int]:
+        """Identifies sequences of the same suit."""
         run_counts = []
         hand_sorted = sorted(hand, key=lambda x: (x.suit.value, x.rank.value))
 
-        if not hand_sorted: return []
+        if not hand_sorted:
+            return []
 
         current_run = [hand_sorted[0]]
         for i in range(1, len(hand_sorted)):
             prev, curr = hand_sorted[i - 1], hand_sorted[i]
+
             if curr.suit == prev.suit and curr.rank.value == prev.rank.value + 1:
                 current_run.append(curr)
             elif curr.suit == prev.suit and curr.rank.value == prev.rank.value:
@@ -180,37 +161,8 @@ class RewardCalculator:
                 if len(current_run) >= 2:
                     run_counts.append(len(current_run))
                 current_run = [curr]
+
         if len(current_run) >= 2:
             run_counts.append(len(current_run))
+
         return run_counts
-
-    def _backtrack_fill(self, remaining_obj, sets, runs):
-        """Greedily assigns the largest partials to the largest objective slots."""
-        if not remaining_obj:
-            return 0
-
-        # For distance-to-win, we can simplify:
-        # Sort objective largest first. Fill with largest matching partials.
-        obj = sorted(remaining_obj, reverse=True)
-        total_fill = 0
-
-        # This is a simplified greedy approach for the potential function.
-        # It counts how many cards contribute to required 3s or 4s.
-        used_sets = sorted(sets, reverse=True)
-        used_runs = sorted(runs, reverse=True)
-
-        for slot_size in obj:
-            if slot_size == 3 and used_sets:
-                found = used_sets.pop(0)
-                total_fill += min(3, found)
-            elif slot_size == 4 and used_runs:
-                found = used_runs.pop(0)
-                total_fill += min(4, found)
-            elif slot_size == 4 and used_sets:
-                # A set can't fill a run slot
-                continue
-            elif slot_size == 3 and used_runs:
-                # A run can't fill a set slot
-                continue
-
-        return total_fill

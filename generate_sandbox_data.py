@@ -20,7 +20,7 @@ import numpy as np
 from config import JoeConfig
 from game_context import GameContext
 from fast_engine import JoeEngine
-from agents import KeyCardAwareHeuristicAgent as HeuristicAgent
+from agents import OpenHandAgent as HeuristicAgent
 from buffers import JoeReplayBuffer
 
 
