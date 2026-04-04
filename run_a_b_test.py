@@ -21,9 +21,9 @@ def run_full_suite(num_games=1000):
     # ---------------------------------------------------------
     # TEST 1: The Teacher vs The Baselines (4-Player)
     # ---------------------------------------------------------
-    # Tests the omniscient drafting and threat detection in a crowded table.
     agents_test_1 = [
-        ProbabilisticAgent(random_seed=101),  # Agent 0: The Omniscient Teacher
+        ProbabilisticAgent(random_seed=101,
+                           expected_horizon_4p=10.8),  # Agent 0:
         HeuristicAgent(random_seed=102),
         HeuristicAgent(random_seed=103),
         HeuristicAgent(random_seed=104)
@@ -35,7 +35,8 @@ def run_full_suite(num_games=1000):
     # ---------------------------------------------------------
     # Tests how well it exploits a slightly looser card economy.
     agents_test_2 = [
-        ProbabilisticAgent(random_seed=201),  # Agent 0: The Omniscient Teacher
+        ProbabilisticAgent(random_seed=201,
+                           expected_horizon_3p=14.2),  # Agent 0:
         HeuristicAgent(random_seed=202),
         HeuristicAgent(random_seed=203)
     ]

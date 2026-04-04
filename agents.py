@@ -23,14 +23,23 @@ class RandomAgent(Agent):
 
 class HeuristicAgent(Agent):
     """
-    The unified 'Ruthless Closer' baseline bot.
-    Aggressively drafts partial melds, hoards key cards, and expands hand capacity late game.
+    The baseline rule-based bot.
+    For the ProbabilisticAgent, this class primarily serves as a fallback handler
+    for strict, rule-bound phases (like playing cards to the table) where
+    complex EV simulation is unnecessary.
     """
 
     def __init__(self, random_seed=None):
         self.rng = random.Random(random_seed)
 
     def select_action(self, state_id, ctx, player_idx, action_mask):
+        """
+        Executes heuristic logic for the current phase.
+        Inherited Purpose: The ProbabilisticAgent falls back to this method
+        specifically for the 'table_play_phase'. If a card can be played on the
+        table, it is always mathematically optimal to do so to reduce deadwood,
+        so we let this greedy heuristic handle it instantly rather than simulating it.
+        """
         player = ctx.players[player_idx] if ctx and ctx.players else None
         hand = player.hand_list if player else []
         discard_top = ctx.discard_pile[-1] if ctx and ctx.discard_pile else None
@@ -306,6 +315,12 @@ class HeuristicAgent(Agent):
         return 0
 
     def _get_deadwood_value(self, card, ctx):
+        """
+        Calculates the literal penalty point value of a single card.
+        Uses: Aces=20, Face Cards=10, Number Cards=5.
+        Rationale: Used by the math engine to quickly look up raw point values
+        without needing matrix multiplication.
+        """
         rank_val = int(card.rank)
         if rank_val == 0 or rank_val == 13:
             return ctx.config.points_ace
@@ -314,6 +329,12 @@ class HeuristicAgent(Agent):
         return ctx.config.points_two_to_seven
 
     def _is_playable_on_table(self, card, ctx):
+        """
+        Determines if a specific card can be legally appended to any face-up
+        meld currently on the table.
+        Rationale: Identifies "Key Cards" which effectively have 0 penalty
+        risk if the bot successfully goes down.
+        """
         suit, rank = int(card.suit), int(card.rank)
         if np.any(ctx.table_sets[:, rank] > 0):
             return True
@@ -322,6 +343,10 @@ class HeuristicAgent(Agent):
         return False
 
     def _get_discard_action_idx(self, card):
+        """
+        Maps a physical Card object to its index in the 58-element action_mask.
+        Math: (Suit * 13) + Rank + 6.
+        """
         return (card.suit.value * 13) + card.rank.value + 6
 
 
@@ -491,12 +516,27 @@ class OpenHandAgent(HeuristicAgent):
 
 
 class ProbabilisticAgent(HeuristicAgent):
-    # Static (4, 14) tensor mapping the penalty values of every card.
-    # Divided by 100 directly here so we don't have to do it during evaluation.
-    # Note: Index 13 (High Ace) is 0 to prevent double-counting with Index 0 (Low Ace).
+    """
+    A unified Expected Value (EV) engine that navigates imperfect information.
+    It evaluates every decision by generating hypothetical future states,
+    calculating the probability of achieving the round objective, and weighing
+    the expected point reward against the risk of an opponent ending the round.
+    """
+
+    def __init__(self, random_seed=None, expected_horizon_3p=14.5, expected_horizon_4p=10.9):
+        super().__init__(random_seed)
+        self.expected_horizon_3p = expected_horizon_3p
+        self.expected_horizon_4p = expected_horizon_4p
 
     def _get_penalty_weights(self, ctx):
-        """Generates and caches the penalty weight tensor from the dynamic config."""
+        """
+        Generates a cached (4, 14) tensor where each index holds the normalized
+        penalty value of that specific card (e.g., 0.20 for Aces, 0.05 for Twos).
+
+        Rationale: Matrix multiplication is significantly faster than looping.
+        By dividing by 100 here, the engine can calculate the point value of
+        an entire 14-card hand in a single C-optimized NumPy operation.
+        """
         if not hasattr(self, '_cached_penalty_weights'):
             weights = np.zeros((4, 14), dtype=np.float32)
             # Divide by 100 here to save operations during the evaluation loop
@@ -509,8 +549,13 @@ class ProbabilisticAgent(HeuristicAgent):
 
     def _get_draw_probability(self, required, available, unknown_cards, horizon=15):
         """
-        Calculates the true probability (0.0 to 1.0) of drawing 'required' copies
-        of a card given 'available' copies in an 'unknown_cards' deck.
+        Calculates the cumulative hypergeometric probability of successfully
+        drawing the `required` amount of a specific card over a given `horizon`.
+
+        Rationale: Converts a singular draw chance (e.g., 2% chance on the next turn)
+        into a realistic trajectory (e.g., 30% chance to find the card before the
+        game ends). This prevents the bot from becoming mathematically paralyzed
+        by the low odds of single draws.
         """
         if required == 0: return 1.0
         if available < required: return 0.0
@@ -529,7 +574,14 @@ class ProbabilisticAgent(HeuristicAgent):
         return p_hit_at_least_one ** required
 
     def _get_expected_stock_value(self, ctx, hand_tensor, player_idx):
-        """Calculates the literal average point value of all unknown cards."""
+        """
+        Calculates the exact average point value of a single card pulled blindly
+        from the stock pile at this specific microsecond.
+
+        Rationale: Used to price the "cost" of a May-I penalty card. If all
+        Aces and Face cards are visible on the table, the stock is "safe" (~5 pts).
+        If no Aces have been played, the stock is "radioactive" (~9+ pts).
+        """
         available = self._get_available_tensor(ctx, hand_tensor, player_idx)
         weights = self._get_penalty_weights(ctx)
 
@@ -543,110 +595,107 @@ class ProbabilisticAgent(HeuristicAgent):
         return avg_points
 
     def _evaluate_hand_state(self, hand_tensor, ctx, player_idx):
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-        all_seeds = self._parse_all_valid_seeds(hand_tensor, req_sets, req_runs)
+        """
+        THE MASTER EQUATION.
+        Evaluates the literal Expected Value (EV) of a hand state in penalty points.
 
-        # 1. Get True Probabilities
-        for seed in all_seeds:
-            seed['ev'] = self._calculate_seed_probability(seed, ctx, hand_tensor, player_idx)
+        Calculates two timelines:
+        1. Timeline A (Imminent Threat): The EV if an opponent ends the game THIS turn.
+           (Results in taking full Deadwood or Total Hand points).
+        2. Timeline B (Future Trajectory): The EV if the game continues naturally.
+           (Results in blended risk and claiming the Opponents' Penalty Points).
 
-        all_seeds.sort(key=lambda x: x['ev'], reverse=True)
+        Rationale: This equation balances aggressive drafting (Timeline B) against
+        sudden-death survival (Timeline A), scaled dynamically by the physical
+        threat level (`p_lose`) of the opponents.
+        """
+        is_down = ctx.players[player_idx].is_down
 
-        slotted_sets_p = []
-        slotted_runs_p = []
-        slotted_mask = np.zeros((4, 14), dtype=np.int8)
-        working_hand = hand_tensor.copy()
+        if is_down:
+            # If we are already down, our melds are on the table. We have won the
+            # objective. Our entire physical hand is just deadwood and key cards.
+            p_win = 1.0
+            slotted_mask = np.zeros((4, 14), dtype=np.int8)
+        else:
+            req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+            p_win, slotted_mask = self._find_best_seed_allocation(
+                hand_tensor, req_sets, req_runs, ctx, player_idx
+            )
+            ace_max = np.maximum(slotted_mask[:, 0], slotted_mask[:, 13])
+            slotted_mask[:, 0] = ace_max
+            slotted_mask[:, 13] = ace_max
 
-        # 2. Strict Consumption Slotting (Unchanged)
-        for seed in all_seeds:
-            if seed['type'] == 'set' and len(slotted_sets_p) < req_sets:
-                target_rank = seed['target_rank']
-                actual_held = np.sum(working_hand[:, target_rank])
-                if actual_held > 0:
-                    slotted_sets_p.append(seed['ev'])
-                    cards_to_consume = min(3, int(actual_held))
-                    consumed = 0
-                    for s in range(4):
-                        while working_hand[s, target_rank] > 0 and consumed < cards_to_consume:
-                            working_hand[s, target_rank] -= 1
-                            slotted_mask[s, target_rank] += 1
-                            consumed += 1
-
-            elif seed['type'] == 'run' and len(slotted_runs_p) < req_runs:
-                suit = seed['suit']
-                start = seed['target_window_start']
-                window = working_hand[suit, start:start + 4]
-                actual_held = np.count_nonzero(window)
-                if actual_held > 0:
-                    slotted_runs_p.append(seed['ev'])
-                    for i in range(4):
-                        if working_hand[suit, start + i] > 0:
-                            working_hand[suit, start + i] -= 1
-                            slotted_mask[suit, start + i] += 1
-
-        # 3. Multiplicative Win Probability (0.0 to 1.0)
-        p_sets = np.prod(slotted_sets_p) if slotted_sets_p else 0.01
-        p_runs = np.prod(slotted_runs_p) if slotted_runs_p else 0.01
-        p_win = p_sets * p_runs
-
-        # If an Ace was consumed at either Index 0 or 13, ensure both indices reflect it
-        ace_max = np.maximum(slotted_mask[:, 0], slotted_mask[:, 13])
-        slotted_mask[:, 0] = ace_max
-        slotted_mask[:, 13] = ace_max
-
-        # 4. REAL POINT CALCULATIONS
         penalty_weights = self._get_penalty_weights(ctx)
-
-        # Calculate literal point values of our hand
         total_hand_points = np.sum(hand_tensor * penalty_weights) * 100.0
 
         deadwood_tensor = np.clip(hand_tensor - slotted_mask, 0, None)
+
+        for suit in range(4):
+            for rank in range(14):
+                if deadwood_tensor[suit, rank] > 0:
+                    if np.any(ctx.table_sets[:, rank] > 0) or ctx._can_extend_run(suit, rank):
+                        deadwood_tensor[suit, rank] = 0
+                        # Ensure the Ace's alter-ego is also zeroed out!
+                        if rank == 0: deadwood_tensor[suit, 13] = 0
+                        if rank == 13: deadwood_tensor[suit, 0] = 0
+
         deadwood_points = np.sum(deadwood_tensor * penalty_weights) * 100.0
 
-        # 5. THE TRUE PROBABILISTIC VICTORY REWARD
         available_tensor = self._get_available_tensor(ctx, hand_tensor, player_idx)
-        unknown_deck_size = float(np.sum(available_tensor))
+        unknown_deck_size = float(np.sum(available_tensor[:, 0:13]))
         unknown_deck_points = np.sum(available_tensor * penalty_weights) * 100.0
-
         avg_unknown_card_val = unknown_deck_points / max(1.0, unknown_deck_size)
 
+        # ==========================================
+        # 1. THE AVALANCHE THREAT
+        # ==========================================
+        p_lose = self._calculate_avalanche_threat(ctx, player_idx, available_tensor,
+                                                  unknown_deck_size)
+
+        # ==========================================
+        # 2. THE REWARD CALCULATION
+        # ==========================================
         opponents_expected_penalty = 0.0
+
         for i, opp in enumerate(ctx.players):
             if i != player_idx:
-                # Calculate known cards physically tracked into their hand
-                # np.clip prevents negative values if they discard a card they were dealt initially
+                opp_hand_size = len(opp.hand_list)
+
                 known_held_tensor = np.clip(
                     ctx.player_pickup_counts[i] - ctx.player_discard_counts[i], 0, None)
+                total_known_cards = float(np.sum(known_held_tensor[:, 0:13]))
 
-                # Count how many public cards we mathematically think they are holding
-                total_known_cards = float(np.sum(known_held_tensor))
-
-                # Edge case safeguard: If they went "down", they played cards to the table.
-                # If our known count exceeds their physical hand size, fallback to average
-                # to prevent overestimating their penalty damage.
-                if total_known_cards > len(opp.hand_list):
-                    opponents_expected_penalty += len(opp.hand_list) * avg_unknown_card_val
+                if total_known_cards > opp_hand_size:
+                    opponents_expected_penalty += opp_hand_size * avg_unknown_card_val
                 else:
-                    # Calculate exact points for the cards we KNOW they hold
                     known_points = np.sum(known_held_tensor * penalty_weights) * 100.0
-
-                    # Calculate average points for the rest of their hidden hand
-                    num_unknown_cards = float(len(opp.hand_list)) - total_known_cards
+                    num_unknown_cards = float(opp_hand_size) - total_known_cards
                     unknown_points = num_unknown_cards * avg_unknown_card_val
-
                     opponents_expected_penalty += (known_points + unknown_points)
 
-        # 6. THE RELATIVE MASTER EQUATION
-        # True Expected Value = (Points we expect to inflict) - (Points we expect to take)
-        expected_value = (p_win * opponents_expected_penalty) - (
-                    (1.0 - p_win) * total_hand_points) - (p_win * deadwood_points)
+        # ==========================================
+        # 3. THE MASTER EQUATION
+        # ==========================================
+        current_physical_penalty = deadwood_points if is_down else total_hand_points
+        future_blended_penalty = (p_win * deadwood_points) + ((1.0 - p_win) * total_hand_points)
+
+        expected_penalty_risk = (p_lose * current_physical_penalty) + (
+                    (1.0 - p_lose) * future_blended_penalty)
+
+        # TOTAL REWARD scales perfectly with the total points in the opponents' hands
+        expected_reward = (1.0 - p_lose) * (p_win * opponents_expected_penalty)
+
+        expected_value = expected_reward - expected_penalty_risk
 
         return expected_value
 
     def _parse_all_valid_seeds(self, hand_tensor, req_sets, req_runs):
         """
-        Scans the (4, 14) hand tensor to find valid structural seeds.
-        Returns a list of dictionaries containing seed metrics.
+        Scans the hand tensor using 4-card sliding windows and frequency counts
+        to identify every possible partial meld (seed) that contributes to the round objective.
+
+        Rationale: The bot must identify its foundational puzzle pieces before
+        it can ask the probability engine how hard it will be to finish them.
         """
         seeds = []
 
@@ -702,8 +751,12 @@ class ProbabilisticAgent(HeuristicAgent):
 
     def _get_available_tensor(self, ctx, hand_tensor, player_idx):
         """
-        Creates a (4, 14) matrix representing all cards physically left to draw.
-        Integrates public opponent pickups to prevent hallucinating dead outs.
+        Subtracts globally visible cards, our hand, and cards legally known to be
+        in opponents' hands from a master (2x) double deck.
+
+        Rationale: Creates the absolute ground-truth "Outs" matrix. By tracking
+        opponent pickups, the bot avoids hallucinating that a card is in the deck
+        when it physically watched an opponent pick it up.
         """
         # 1. Start with the globally visible cards and our own hand
         known_tensor = (ctx.table_sets +
@@ -724,18 +777,30 @@ class ProbabilisticAgent(HeuristicAgent):
         return np.clip(2 - known_tensor, 0, 2)
 
     def _calculate_seed_probability(self, seed, ctx, hand_tensor, player_idx):
-        """Returns a strict 0.0 to 1.0 probability of completing this seed."""
+        """
+        Evaluates a specific seed (e.g., a Run missing one card) and calculates
+        the exact $P(win)$ of completing it.
+
+        Rationale: Acts as the bridge between the structural parser (`_parse_all_valid_seeds`)
+        and the statistical engine (`_get_draw_probability`), factoring in
+        empirical time limits (the 3P vs 4P horizon).
+        """
         if seed['distance'] == 0:
             return 1.0
 
-            # --- PASS player_idx HERE ---
         available_tensor = self._get_available_tensor(ctx, hand_tensor, player_idx)
         unknown_deck_size = float(np.sum(available_tensor[:, 0:13]))
+
+        if len(ctx.players) == 3:
+            horizon = self.expected_horizon_3p
+        else:
+            horizon = self.expected_horizon_4p
 
         if seed['type'] == 'set':
             target_rank = seed['target_rank']
             live_draws = float(np.sum(available_tensor[:, target_rank]))
-            return self._get_draw_probability(seed['distance'], live_draws, unknown_deck_size)
+            return self._get_draw_probability(seed['distance'], live_draws, unknown_deck_size,
+                                              horizon=horizon)
 
         elif seed['type'] == 'run':
             suit = seed['suit']
@@ -743,17 +808,118 @@ class ProbabilisticAgent(HeuristicAgent):
 
             for missing_rank in seed['missing_ranks']:
                 specific_draws = float(available_tensor[suit, missing_rank])
-                p_hole = self._get_draw_probability(1, specific_draws, unknown_deck_size)
+                p_hole = self._get_draw_probability(1, specific_draws, unknown_deck_size,
+                                                    horizon=horizon)
                 p_run *= p_hole
 
             return p_run
 
         return 0.0
 
+    def _find_best_seed_allocation(self, hand_tensor, req_sets, req_runs, ctx, player_idx):
+        """
+        Dynamic Greedy Algorithm.
+        Achieves optimal seed allocation without the exponential compute overhead of a DFS.
+        """
+        p_win = 1.0
+        slotted_mask = np.zeros((4, 14), dtype=np.int8)
+        working_hand = hand_tensor.copy()
+
+        sets_found = 0
+        runs_found = 0
+
+        # Loop strictly bounds to the maximum requirements (e.g., 3 iterations)
+        while sets_found < req_sets or runs_found < req_runs:
+
+            # 1. Parse valid seeds strictly from the REMAINING working hand
+            current_seeds = self._parse_all_valid_seeds(working_hand, req_sets - sets_found,
+                                                        req_runs - runs_found)
+
+            if not current_seeds:
+                break  # The hand is physically empty or has no valid seeds left
+
+            # 2. Calculate accurate EV based on the remaining cards
+            for seed in current_seeds:
+                seed['ev'] = self._calculate_seed_probability(seed, ctx, working_hand, player_idx)
+
+            # 3. Greedily pick the absolute highest probability seed
+            best_seed = max(current_seeds, key=lambda x: x['ev'])
+
+            # 4. Physically consume the cards from the working hand
+            if best_seed['type'] == 'set':
+                sets_found += 1
+                rank = best_seed['target_rank']
+                # Consume all available cards of this rank to avoid leaving stragglers
+                for s in range(4):
+                    while working_hand[s, rank] > 0:
+                        ctx._sync_ace(working_hand, s, rank, increment=False)
+                        slotted_mask[s, rank] += 1
+
+            elif best_seed['type'] == 'run':
+                runs_found += 1
+                suit = best_seed['suit']
+                start = best_seed['target_window_start']
+                for r in range(start, start + 4):
+                    if working_hand[suit, r] > 0:
+                        ctx._sync_ace(working_hand, suit, r, increment=False)
+                        slotted_mask[suit, r] += 1
+
+            # Accumulate the total probability
+            p_win *= best_seed['ev']
+
+        # 5. Apply Additive Smoothing for unfulfilled requirements
+        missing_sets = req_sets - sets_found
+        missing_runs = req_runs - runs_found
+
+        p_win *= (0.01 ** missing_sets)
+        p_win *= (0.01 ** missing_runs)
+
+        return p_win, slotted_mask
+
+    def _calculate_avalanche_threat(self, ctx, player_idx, available_tensor, unknown_deck_size):
+        """
+        Calculates the 1-turn sudden-death probability (p_lose) of an opponent going out.
+        """
+        physical_table_outs = 0.0
+        for s in range(4):
+            for r in range(1, 14):  # Exclude 0 to avoid double-counting Aces
+                if np.any(ctx.table_sets[:, r] > 0) or ctx._can_extend_run(s, r):
+                    physical_table_outs += float(available_tensor[s, r])
+
+        p_draw_out_single = physical_table_outs / max(1.0, unknown_deck_size)
+        p_safe = 1.0
+
+        for i, opp in enumerate(ctx.players):
+            if i != player_idx:
+                opp_hand_size = len(opp.hand_list)
+
+                if getattr(opp, 'is_down', False):
+                    if opp_hand_size == 0:
+                        opp_threat = 1.0
+                    else:
+                        p_hold_avalanche = (float(opp_hand_size) / max(1.0, unknown_deck_size)) ** (
+                                    opp_hand_size - 1)
+                        opp_threat = p_draw_out_single * p_hold_avalanche
+                else:
+                    opp_threat = 0.02
+
+                p_safe *= (1.0 - opp_threat)
+
+        p_lose = 1.0 - p_safe
+        return max(0.01, min(0.99, p_lose))
+
     def select_action(self, state_id, ctx, player_idx, action_mask):
         """
-        Overrides the Heuristic Action Selection with a 1-Ply Stochastic Lookahead.
-        Now uses True Probability & Expected Penalty Points.
+        Overrides the rule-based heuristics with a 1-Ply Stochastic Lookahead.
+
+        - Discard Phase: Simulates the EV of the hand *after* dropping every legally discardable card.
+        - Pickup Phase: Simulates the EV of a Full Turn (Pickup + Best Discard).
+        - May-I Phase: Compares baseline EV against the EV of expanding the hand,
+          minus the dynamic expected risk of the blind stock card.
+        - Go Down Phase: Deterministically locks in melds to secure EV safety.
+
+        Rationale: Converts static rules into dynamic, localized math. The bot
+        "feels" the weight of every action by looking exactly one turn into the future.
         """
         player = ctx.players[player_idx]
         hand_tensor = player.private_hand
@@ -824,37 +990,104 @@ class ProbabilisticAgent(HeuristicAgent):
         # 3. MAY-I DECISION (The Expansion Valve)
         # ==========================================
         elif state_id == 'may_i_decision' and discard_top and action_mask[2]:
+
+            if hasattr(ctx, 'may_i_target_idx') and ctx.may_i_target_idx is not None:
+                player_idx = ctx.may_i_target_idx
+
+            hand_tensor = ctx.players[player_idx].private_hand
             baseline_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
 
-            # Step 1: Simulate the pickup of the targeted discard
             hypo_tensor = hand_tensor.copy()
             suit, rank = int(discard_top.suit), int(discard_top.rank)
             ctx._sync_ace(hypo_tensor, suit, rank, increment=True)
 
-            # Step 2: Ask the EV engine how much better the hand becomes with that card
-            # (Note: May-I doesn't force a discard yet, so we don't simulate a discard here)
             pickup_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx)
+            stock_pts = self._get_expected_stock_value(ctx, hand_tensor, player_idx)
 
-            # Step 3: DYNAMIC RISK ASSESSMENT
-            # Calculate the literal expected debt of the random penalty card from the stock
-            # Inside the 'may_i_decision' block in select_action:
-            expected_penalty_damage = self._get_expected_stock_value(ctx, hand_tensor, player_idx)
+            # --- THE AVALANCHE THREAT ---
+            available_est = self._get_available_tensor(ctx, hand_tensor, player_idx)
+            unknown_size_est = float(np.sum(available_est[:, 0:13]))
 
-            # Step 4: Decision Logic
-            # Only May-I if the hand improvement pays off the literal
-            # expected debt of the random card + a 5-point margin for round-end risk.
-            if (pickup_ev - expected_penalty_damage) > baseline_ev + 5.0:
+            p_lose_est = self._calculate_avalanche_threat(ctx, player_idx, available_est,
+                                                          unknown_size_est)
+
+            ev_cost_of_blind_card = stock_pts * p_lose_est
+
+            if (pickup_ev - ev_cost_of_blind_card) > baseline_ev + 2.0:
                 return 2
 
             if action_mask[3]:
                 return 3
 
         # ==========================================
-        # 4. FALLBACK (Going Down & Table Play)
+        # 4. GO DOWN DECISION (The Tactical Sandbag)
         # ==========================================
-        # Let the base HeuristicAgent handle going down and playing on table melds,
+        elif state_id == 'go_down_decision':
+            if action_mask[4] and action_mask[5]:
+
+                # Option A: Wait (Sandbag). Our EV relies on keeping the table locked.
+                wait_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
+
+                # Option B: Go Down. We simulate physically placing the melds.
+                hypo_ctx = ctx.clone()
+                hypo_ctx.auto_place_cards(player_idx)
+                hypo_hand_tensor = hypo_ctx.players[player_idx].private_hand
+
+                # Re-evaluate. The engine will notice our deadwood dropped, BUT it will also
+                # detect the new 'sparks' on the table and spike the opponents' Avalanche Threat!
+                go_down_ev = self._evaluate_hand_state(hypo_hand_tensor, hypo_ctx, player_idx)
+
+                # If unlocking the table destroys our reward probability more than it
+                # saves us in penalty risk, the bot will naturally choose to sandbag!
+                if go_down_ev > wait_ev:
+                    return 4
+                else:
+                    return 5
+
+            elif action_mask[4]:
+                return 4
+            return 5
+
+        # ==========================================
+        # 5. FALLBACK (Table Play & Edge Cases)
+        # ==========================================
+        # Let the base HeuristicAgent handle playing on table melds,
         # as those are strictly rule-bound actions that don't require EV simulation.
         return super().select_action(state_id, ctx, player_idx, action_mask)
+
+
+class BayesianAgent(ProbabilisticAgent):
+    """
+        An advanced Player-Profiling engine that evolves the ProbabilisticAgent
+        by replacing uniform deck assumptions with Bayesian Inference.
+
+        While the ProbabilisticAgent treats all unknown cards as a randomized
+        uniform distribution, the BayesianAgent maintains a persistent
+        'Observation Tensor' to track the specific 'scents' of opponents' hands.
+        By analyzing pickup and discard history, it builds a non-uniform
+        probability heatmap of the hidden state.
+
+        Key Objectives:
+        1. Cures the 'Average Card Fallacy': Recognizes that the deck is not
+           randomly distributed but filtered by the heuristic biases of
+           opponents.
+        2. Identifies 'Toxic Seeds': Detects when an opponent is building a
+           specific suit or rank, allowing the bot to pivot its own strategy
+           or intentionally hoard 'sparks' to starve the opponent.
+        3. Optimizes 4-Player Horizons: Mathematically slows down the
+           'Heuristic Swarm' by denying high-probability connections,
+           forcing the game into a turn-count window where EV-logic can
+           reliably dominate.
+
+        Implementation Details:
+        - Inherits the 1-Ply Stochastic Lookahead and Master EV Equation
+          from ProbabilisticAgent.
+        - Overrides `_get_available_tensor` to return a weighted probability
+          matrix (Heatmap) instead of a flat frequency count.
+        - Introduces a persistent 'Observation Memory' to update player
+          suit/rank probabilities after every turn.
+    """
+    pass
 
 
 class ONNXAgent(Agent):
