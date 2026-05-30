@@ -1,3 +1,4 @@
+import math
 import random
 import numpy as np
 import onnxruntime as ort
@@ -265,7 +266,7 @@ class HeuristicAgent(Agent):
         return remaining_count
 
     def _calculate_go_down_probability(self, ctx, player_idx):
-        prob = 0.8
+        prob = 0.5
         patience_threshold = 8.0 + ctx.current_round_idx
         turn_pressure = ctx.current_circuit / patience_threshold
         prob = max(prob, turn_pressure)
@@ -549,29 +550,42 @@ class ProbabilisticAgent(HeuristicAgent):
 
     def _get_draw_probability(self, required, available, unknown_cards, horizon=15):
         """
-        Calculates the cumulative hypergeometric probability of successfully
-        drawing the `required` amount of a specific card over a given `horizon`.
+        Calculates the cumulative probability of successfully drawing at least the
+        `required` amount of a specific card over a given `horizon`.
+
+        Uses a Binomial approximation of the hypergeometric distribution to accurately
+        sum the exact probabilities of drawing k cards.
 
         Rationale: Converts a singular draw chance (e.g., 2% chance on the next turn)
         into a realistic trajectory (e.g., 30% chance to find the card before the
-        game ends). This prevents the bot from becoming mathematically paralyzed
-        by the low odds of single draws.
+        game ends). Crucially, this mathematically grounds the bot, preventing it
+        from overestimating its chances of pulling multiple perfect cards (like an
+        entire 3-card set) from a completely empty hand.
         """
         if required == 0: return 1.0
         if available < required: return 0.0
         if unknown_cards <= 0: return 0.0
 
-        # Chance to NOT draw a specific card in 1 draw
-        p_miss_single = max(0.0, (unknown_cards - available) / unknown_cards)
+        # Binomial approximation of hypergeometric
+        p_success = available / unknown_cards
+        p_fail = 1.0 - p_success
 
-        # Chance to NOT draw it over the entire horizon
-        p_miss_all = p_miss_single ** horizon
+        # We want P(X >= required).
+        # Mathematically: 1.0 - P(X = 0) - P(X = 1) ... - P(X = required - 1)
+        cumulative_miss_prob = 0.0
+        int_horizon = int(max(1, horizon))
 
-        # Chance to draw AT LEAST 1 copy
-        p_hit_at_least_one = 1.0 - p_miss_all
+        for k in range(int(required)):
+            # If horizon is smaller than k, we physically can't draw enough cards
+            if int_horizon < k:
+                cumulative_miss_prob += 0.0
+                continue
 
-        # If we need multiple copies, we multiply the probabilities.
-        return p_hit_at_least_one ** required
+            nCr = math.comb(int_horizon, k)
+            p_exact_k = nCr * (p_success ** k) * (p_fail ** max(0, int_horizon - k))
+            cumulative_miss_prob += p_exact_k
+
+        return max(0.0, 1.0 - cumulative_miss_prob)
 
     def _get_expected_stock_value(self, ctx, hand_tensor, player_idx):
         """
@@ -594,7 +608,7 @@ class ProbabilisticAgent(HeuristicAgent):
         avg_points = (np.sum(available * weights) / total_unknown_cards) * 100.0
         return avg_points
 
-    def _evaluate_hand_state(self, hand_tensor, ctx, player_idx):
+    def _evaluate_hand_state(self, hand_tensor, ctx, player_idx, horizon_offset=0):
         """
         THE MASTER EQUATION.
         Evaluates the literal Expected Value (EV) of a hand state in penalty points.
@@ -612,14 +626,14 @@ class ProbabilisticAgent(HeuristicAgent):
         is_down = ctx.players[player_idx].is_down
 
         if is_down:
-            # If we are already down, our melds are on the table. We have won the
-            # objective. Our entire physical hand is just deadwood and key cards.
             p_win = 1.0
             slotted_mask = np.zeros((4, 14), dtype=np.int8)
         else:
             req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+
+            # 2. Update this call to pass the offset down:
             p_win, slotted_mask = self._find_best_seed_allocation(
-                hand_tensor, req_sets, req_runs, ctx, player_idx
+                hand_tensor, req_sets, req_runs, ctx, player_idx, horizon_offset=horizon_offset
             )
             ace_max = np.maximum(slotted_mask[:, 0], slotted_mask[:, 13])
             slotted_mask[:, 0] = ace_max
@@ -674,17 +688,22 @@ class ProbabilisticAgent(HeuristicAgent):
                     opponents_expected_penalty += (known_points + unknown_points)
 
         # ==========================================
-        # 3. THE MASTER EQUATION
+        # 3. THE MASTER EQUATION (Pairwise Difference)
         # ==========================================
+        num_opponents = len(ctx.players) - 1
+
         current_physical_penalty = deadwood_points if is_down else total_hand_points
-        future_blended_penalty = (p_win * deadwood_points) + ((1.0 - p_win) * total_hand_points)
+        future_blended_penalty = (p_win * deadwood_points) + (
+                    (1.0 - p_win) * total_hand_points)
 
-        expected_penalty_risk = (p_lose * current_physical_penalty) + (
-                    (1.0 - p_lose) * future_blended_penalty)
+        # THE FIX: Multiply our personal penalty risk by the number of opponents
+        expected_penalty_risk = num_opponents * ((p_lose * current_physical_penalty) + (
+                    (1.0 - p_lose) * future_blended_penalty))
 
-        # TOTAL REWARD scales perfectly with the total points in the opponents' hands
+        # Reward remains the sum of the opponents' penalties
         expected_reward = (1.0 - p_lose) * (p_win * opponents_expected_penalty)
 
+        # Pairwise EV automatically restores the 1:1 pot odds ratio
         expected_value = expected_reward - expected_penalty_risk
 
         return expected_value
@@ -776,25 +795,22 @@ class ProbabilisticAgent(HeuristicAgent):
         # np.clip ensures we don't drop below 0 if matrix math gets weird
         return np.clip(2 - known_tensor, 0, 2)
 
-    def _calculate_seed_probability(self, seed, ctx, hand_tensor, player_idx):
-        """
-        Evaluates a specific seed (e.g., a Run missing one card) and calculates
-        the exact $P(win)$ of completing it.
-
-        Rationale: Acts as the bridge between the structural parser (`_parse_all_valid_seeds`)
-        and the statistical engine (`_get_draw_probability`), factoring in
-        empirical time limits (the 3P vs 4P horizon).
-        """
+    def _calculate_seed_probability(self, seed, ctx, hand_tensor, player_idx, horizon_offset=0):
         if seed['distance'] == 0:
             return 1.0
 
         available_tensor = self._get_available_tensor(ctx, hand_tensor, player_idx)
         unknown_deck_size = float(np.sum(available_tensor[:, 0:13]))
 
+        # --- DYNAMIC TICKING CLOCK ---
         if len(ctx.players) == 3:
-            horizon = self.expected_horizon_3p
+            total_horizon = self.expected_horizon_3p
         else:
-            horizon = self.expected_horizon_4p
+            total_horizon = self.expected_horizon_4p
+
+        # Subtract the current circuit to find true remaining turns,
+        # then add the virtual 'May-I' offset.
+        horizon = max(1.0, (total_horizon - ctx.current_circuit) + horizon_offset)
 
         if seed['type'] == 'set':
             target_rank = seed['target_rank']
@@ -816,7 +832,8 @@ class ProbabilisticAgent(HeuristicAgent):
 
         return 0.0
 
-    def _find_best_seed_allocation(self, hand_tensor, req_sets, req_runs, ctx, player_idx):
+    def _find_best_seed_allocation(self, hand_tensor, req_sets,
+                                   req_runs, ctx, player_idx, horizon_offset=0):
         """
         Dynamic Greedy Algorithm.
         Achieves optimal seed allocation without the exponential compute overhead of a DFS.
@@ -831,16 +848,16 @@ class ProbabilisticAgent(HeuristicAgent):
         # Loop strictly bounds to the maximum requirements (e.g., 3 iterations)
         while sets_found < req_sets or runs_found < req_runs:
 
-            # 1. Parse valid seeds strictly from the REMAINING working hand
             current_seeds = self._parse_all_valid_seeds(working_hand, req_sets - sets_found,
                                                         req_runs - runs_found)
 
             if not current_seeds:
-                break  # The hand is physically empty or has no valid seeds left
+                break
 
-            # 2. Calculate accurate EV based on the remaining cards
+                # 2. Update this loop to pass the offset down:
             for seed in current_seeds:
-                seed['ev'] = self._calculate_seed_probability(seed, ctx, working_hand, player_idx)
+                seed['ev'] = self._calculate_seed_probability(seed, ctx, working_hand, player_idx,
+                                                              horizon_offset=horizon_offset)
 
             # 3. Greedily pick the absolute highest probability seed
             best_seed = max(current_seeds, key=lambda x: x['ev'])
@@ -987,7 +1004,7 @@ class ProbabilisticAgent(HeuristicAgent):
                 return 0
 
         # ==========================================
-        # 3. MAY-I DECISION (The Expansion Valve)
+        # 3. MAY-I DECISION (The Virtual Turn Expansion)
         # ==========================================
         elif state_id == 'may_i_decision' and discard_top and action_mask[2]:
 
@@ -995,25 +1012,34 @@ class ProbabilisticAgent(HeuristicAgent):
                 player_idx = ctx.may_i_target_idx
 
             hand_tensor = ctx.players[player_idx].private_hand
-            baseline_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
+
+            # 1. Baseline: Hand as it is, with 0 offset
+            baseline_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx,
+                                                    horizon_offset=0)
 
             hypo_tensor = hand_tensor.copy()
             suit, rank = int(discard_top.suit), int(discard_top.rank)
             ctx._sync_ace(hypo_tensor, suit, rank, increment=True)
 
-            pickup_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx)
+            # 2. Pickup: Hand + extra card, WITH the +1 'Virtual Turn' offset
+            pickup_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx,
+                                                  horizon_offset=1)
+
             stock_pts = self._get_expected_stock_value(ctx, hand_tensor, player_idx)
 
             # --- THE AVALANCHE THREAT ---
             available_est = self._get_available_tensor(ctx, hand_tensor, player_idx)
             unknown_size_est = float(np.sum(available_est[:, 0:13]))
 
+            # Uses the DRY refactored helper method
             p_lose_est = self._calculate_avalanche_threat(ctx, player_idx, available_est,
                                                           unknown_size_est)
 
+            # The expected cost remains bound to a strict 1-turn sudden death evaluation
             ev_cost_of_blind_card = stock_pts * p_lose_est
 
-            if (pickup_ev - ev_cost_of_blind_card) > baseline_ev + 2.0:
+            # 3. Pure Mathematical Comparison (No + 2.0 heuristic!)
+            if (pickup_ev - ev_cost_of_blind_card) > baseline_ev:
                 return 2
 
             if action_mask[3]:

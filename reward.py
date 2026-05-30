@@ -12,6 +12,7 @@ class RewardCalculator:
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
+        self.win_hunger = 40.0
 
     def calculate_state_potential(self, player_idx: int, oracle_probs: np.ndarray = None) -> float:
         """
@@ -56,11 +57,65 @@ class RewardCalculator:
         # Scale the difficulty down slightly so it guides rather than overrides distance
         effective_distance = raw_distance + (difficulty_penalty * 0.15)
 
-        win_component = -(effective_distance * 40.0)
+        win_component = -(effective_distance * self.win_hunger)
         speed_penalty = current_turn * 3.0
         tide_multiplier = 0.1 + (oracle_threat * 1.4)
 
         return float(win_component - (raw_deadwood * tide_multiplier) - speed_penalty)
+
+    def calculate_distance_to_win(self, player_idx: int) -> float:
+        """
+        Calculates the physical distance (in cards) to the round's objective.
+        Evaluates partial progress (e.g., a pair counts as 2 valid cards towards a 3-set).
+        """
+        import numpy as np  # Ensure numpy is imported in your file
+
+        player = self.ctx.players[player_idx]
+        req_sets, req_runs = self.ctx.config.objective_map[self.ctx.current_round_idx]
+
+        # Calculate the absolute maximum distance
+        total_required_cards = (req_sets * 3) + (req_runs * 4)
+
+        if not player.hand_list:
+            return float(total_required_cards)
+
+        hand_tensor = player.private_hand
+        valid_cards = 0
+
+        # 1. Greedy Partial Sets Evaluation
+        if req_sets > 0:
+            # Sum across all 4 suits to get the total count of each rank
+            rank_counts = np.sum(hand_tensor, axis=0)
+
+            # Extract the counts (ignoring the 0 index duplicate Ace), cap them at 3, and sort
+            sorted_counts = sorted([min(3, int(rank_counts[r])) for r in range(1, 14)],
+                                   reverse=True)
+
+            # Take the best groupings up to the required amount of sets
+            valid_cards += sum(sorted_counts[:req_sets])
+
+        # 2. Greedy Partial Runs Evaluation
+        if req_runs > 0:
+            run_lengths = []
+            for suit in range(4):
+                current_run = 0
+                # Scan from Ace Low (0) to King (12) and Ace High (13)
+                for rank in range(14):
+                    if hand_tensor[suit, rank] > 0:
+                        current_run += 1
+                    else:
+                        if current_run > 0:
+                            run_lengths.append(min(4, current_run))
+                            current_run = 0
+                if current_run > 0:
+                    run_lengths.append(min(4, current_run))
+
+            # Sort the contiguous chunks and take the best ones
+            sorted_runs = sorted(run_lengths, reverse=True)
+            valid_cards += sum(sorted_runs[:req_runs])
+
+        distance = total_required_cards - valid_cards
+        return float(max(0, distance))
 
     def _identify_needed_cards(self, player_idx: int) -> list:
         """

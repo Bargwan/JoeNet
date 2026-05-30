@@ -129,7 +129,7 @@ class TestDataGenerationPipeline(unittest.TestCase):
         with patch.object(GameContext, 'check_hand_objective', new=fake_check_objective), \
                 patch.object(GameContext, 'go_down', new=fake_go_down), \
                 patch.object(GameContext, '_search_melds', return_value=(False, None, None)):
-            game_data = _worker_generate_game(game_seed=42)
+            game_data = _worker_generate_game((42, 4))
 
         # 2. ASSERT: It should return a list of dictionaries representing the episode
         self.assertIsInstance(game_data, list)

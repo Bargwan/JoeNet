@@ -47,7 +47,12 @@ class MockJoeNet(torch.nn.Module):
         self.dummy_weight = torch.nn.Parameter(torch.ones(1))
 
     # --- Mocking the Sub-Modules ---
-    def oracle(self, spatial, scalar):
+    def oracle_3p(self, spatial, scalar):
+        batch_size = spatial.shape[0]
+        return torch.sigmoid(
+            torch.ones((batch_size, 3, 4, 14), requires_grad=True) * self.dummy_weight)
+
+    def oracle_4p(self, spatial, scalar):
         batch_size = spatial.shape[0]
         return torch.sigmoid(
             torch.ones((batch_size, 3, 4, 14), requires_grad=True) * self.dummy_weight)
@@ -111,8 +116,8 @@ class TestSupervisedTrainingLoop(unittest.TestCase):
                                          mode='oracle')
 
         # Tuple: (act_loss, crit_loss, ora_loss, tot_loss, entropy, num_batches)
-        self.assertEqual(len(metrics), 6)
-        self.assertGreater(metrics[2], 0.0, "Oracle loss should be calculated.")
+        self.assertEqual(len(metrics), 9)
+        self.assertGreater(metrics[2] + metrics[3], 0.0, "Oracle loss should be calculated.")
         self.assertEqual(metrics[0], 0.0, "Actor loss should be ignored in Oracle mode.")
 
         final_weight = model.dummy_weight.item()
@@ -131,7 +136,7 @@ class TestSupervisedTrainingLoop(unittest.TestCase):
                                          mode='decision')
 
         # Tuple: (act_loss, crit_loss, ora_loss, tot_loss, entropy, num_batches)
-        self.assertEqual(len(metrics), 6)
+        self.assertEqual(len(metrics), 9)
         self.assertGreater(metrics[0], 0.0, "Actor loss should be calculated.")
         self.assertGreater(metrics[1], 0.0, "Critic loss should be calculated.")
         self.assertEqual(metrics[2], 0.0, "Oracle loss should be ignored in Decision mode.")

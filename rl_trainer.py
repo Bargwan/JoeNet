@@ -21,10 +21,13 @@ class RLTrainer:
         # Dynamically grab the device the model is currently sitting on
         device = next(self.model.parameters()).device
 
-        # Extract and immediately push all tensors to the correct device
-        spatial = batch_tensors['spatial'].to(device)
+        # Extract and clone spatial to prevent in-place memory mutation of the batch dictionary
+        spatial = batch_tensors['spatial'].to(device).clone()
         presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-        spatial[:, presence_channels, :, :] /= 2.0
+
+        # Out-of-place division
+        spatial[:, presence_channels, :, :] = spatial[:, presence_channels, :, :] / 2.0
+
         scalar = batch_tensors['scalar'].to(device)
         mask = batch_tensors['mask'].to(device)
         actions = batch_tensors['action'].to(device)

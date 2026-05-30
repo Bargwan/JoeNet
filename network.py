@@ -234,7 +234,10 @@ class JoeNet(nn.Module):
 
             # --- ENFORCE ABSOLUTE ZERO ---
             # Manually kill any Sigmoid floating-point noise in the 3rd opponent slot
-            probs_3p[:, 2, :, :] = 0.0
+            # (Must use out-of-place multiplication to preserve the autograd graph!)
+            mask_3p = torch.ones_like(probs_3p)
+            mask_3p[:, 2, :, :] = 0.0
+            probs_3p = probs_3p * mask_3p
 
             oracle_probs[is_3_player] = probs_3p
 

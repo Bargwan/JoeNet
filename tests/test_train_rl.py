@@ -9,7 +9,7 @@ class TestTrainRL(unittest.TestCase):
 
     def test_calculate_pbrs_reward_normal_step(self):
         """
-        Verify standard PBRS reward calculation: R = Phi(s') - Phi(s)
+        Verify standard PBRS reward calculation with Gamma discount.
         """
         current_phi = 10.0
         next_phi = 15.0
@@ -21,8 +21,8 @@ class TestTrainRL(unittest.TestCase):
             terminal_score=0.0
         )
 
-        # 15.0 - 10.0 = 5.0
-        self.assertEqual(reward, 5.0, "PBRS step reward must be the difference in potential.")
+        # (0.99 * 15.0) - 10.0 = 4.85
+        self.assertEqual(reward, 4.85, "PBRS step reward must discount next_phi by gamma.")
 
     def test_calculate_pbrs_reward_terminal_step(self):
         """
@@ -73,10 +73,10 @@ class TestTrainRL(unittest.TestCase):
 
 import numpy as np
 # Add EpisodeTracker to your imports from train_rl
-from train_rl import calculate_pbrs_reward, RLRunner, EpisodeTracker
+from train_rl import calculate_pbrs_reward, RLRunner, MultiPlayerTracker
 
 
-class TestEpisodeTracker(unittest.TestCase):
+class TestMultiPlayerTracker(unittest.TestCase):
 
     def test_delayed_step_caching(self):
         """
@@ -84,7 +84,8 @@ class TestEpisodeTracker(unittest.TestCase):
         to calculate Phi(s') before pushing to the RolloutBuffer.
         """
         mock_buffer = MagicMock()
-        tracker = EpisodeTracker(mock_buffer)
+        # NEW: Must specify num_players
+        tracker = MultiPlayerTracker(mock_buffer, num_players=1)
 
         # 1. SETUP: Dummy data for Turn 1
         spatial_1 = np.zeros((13, 4, 14))
@@ -94,8 +95,8 @@ class TestEpisodeTracker(unittest.TestCase):
         phi_1 = 5.0
         truth_1 = np.zeros((3, 4, 14))
 
-        # 2. ACT: Agent 0 takes a turn
-        tracker.cache_step(spatial_1, scalar_1, mask_1, action_1, phi_1, truth_1)
+        # 2. ACT: Agent 0 takes a turn (NEW: add player_idx 0 as first arg)
+        tracker.cache_step(0, spatial_1, scalar_1, mask_1, action_1, phi_1, truth_1)
 
         # ASSERT: The buffer must NOT be updated yet! We don't know the next state.
         mock_buffer.add.assert_not_called()
@@ -108,22 +109,17 @@ class TestEpisodeTracker(unittest.TestCase):
         phi_2 = 8.0
         truth_2 = np.zeros((3, 4, 14))
 
-        # 4. ACT: Agent 0 takes their next turn. This should trigger the push
-        # of the FIRST cached step into the buffer.
-        tracker.cache_step(spatial_2, scalar_2, mask_2, action_2, phi_2, truth_2)
+        # 4. ACT: Agent 0 takes their next turn.
+        tracker.cache_step(0, spatial_2, scalar_2, mask_2, action_2, phi_2, truth_2)
 
-        # ASSERT: The buffer should now receive Turn 1's data, with a reward calculated
-        # using Turn 2's potential (8.0 - 5.0 = 3.0)
+        # ASSERT: The buffer should now receive Turn 1's data
         mock_buffer.add.assert_called_once()
-
-        # Extract the arguments passed to buffer.add()
         args, kwargs = mock_buffer.add.call_args
 
-        # Verify the pushed action was action_1
         self.assertEqual(kwargs.get('action', args[3] if len(args) > 3 else None), 10)
-
-        # Verify the PBRS reward was calculated correctly (phi_2 - phi_1)
-        self.assertEqual(kwargs.get('reward', args[4] if len(args) > 4 else None), 3.0)
+        # Note: Your new tracker applies a gamma default of 0.99.
+        # (0.99 * 8.0) - 5.0 = 2.92
+        self.assertAlmostEqual(kwargs.get('reward', args[4] if len(args) > 4 else None), 2.92, places=2)
         self.assertFalse(kwargs.get('is_terminal', args[5] if len(args) > 5 else False))
 
     def test_terminal_step_flush(self):
@@ -132,17 +128,17 @@ class TestEpisodeTracker(unittest.TestCase):
         step into the buffer using the Asymmetric Terminal Score.
         """
         mock_buffer = MagicMock()
-        tracker = EpisodeTracker(mock_buffer)
+        tracker = MultiPlayerTracker(mock_buffer, num_players=1)
 
-        # 1. SETUP: Cache a step
-        tracker.cache_step(np.zeros((13, 4, 14)), np.zeros(28), np.ones(58, dtype=bool), 5,
+        # 1. SETUP: Cache a step for Player 0
+        tracker.cache_step(0, np.zeros((13, 4, 14)), np.zeros(28), np.ones(58, dtype=bool), 5,
                            current_phi=10.0, oracle_truth=np.zeros((3, 4, 14)))
 
         # 2. ACT: The round ends. We flush the cache with the terminal score.
-        terminal_score = -20.0  # Agent won by 20 points
-        tracker.flush_terminal(terminal_score)
+        terminal_score = -20.0
+        tracker.flush_terminal(0, terminal_score)
 
-        # 3. ASSERT: Buffer updated with terminal flag and anchored reward (-20.0 - 10.0 = -30.0)
+        # 3. ASSERT: Buffer updated
         mock_buffer.add.assert_called_once()
         args, kwargs = mock_buffer.add.call_args
 

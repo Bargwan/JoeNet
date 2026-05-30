@@ -70,16 +70,20 @@ class TestDistanceToWin(unittest.TestCase):
     def test_state_potential_calculation(self):
         """
         Verify the final Phi(s) math converts distance into a negative potential score.
-        Formula: -(Distance * win_hunger)
+        Formula: win_component - (raw_deadwood * tide_multiplier) - speed_penalty
         """
         self.ctx.current_round_idx = 0
         # Pair = 2 cards. Distance = 4.
         cards = [Card(Suit.SPADES, Rank.EIGHT), Card(Suit.HEARTS, Rank.EIGHT)]
         self.ctx.players[0].receive_cards(cards)
 
-        # Expected: -(4 * 25.0) = -100.0
+        # Expected Math:
+        # Distance (4) * win_hunger (25.0) = -100.0
+        # Deadwood (two 8s @ 10 pts each) = 20 points
+        # Tide Multiplier (Opponents have 0 cards, max threat) = 1.5
+        # Total: -100.0 - (20.0 * 1.5) = -130.0
         potential = self.reward_calc.calculate_state_potential(player_idx=0)
-        self.assertEqual(potential, -100.0, "State Potential Phi(s) math is incorrect.")
+        self.assertEqual(potential, -130.0, "State Potential Phi(s) math is incorrect.")
 
 
 class TestAsymmetricScoring(unittest.TestCase):
