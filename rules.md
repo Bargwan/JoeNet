@@ -1,13 +1,12 @@
-# Rules of Joe (Imperfect-Information Rummy Variant)
+# Rules of Joe
 
 ## 1. Terminology
 * **Game Round:** One of the 7 deals that make up a game. Each Game Round has its own objective (Section 3). The word "round" on its own always means a Game Round.
 * **Turn:** One player's Pickup → Action → Discard sequence (Section 4).
-* **Meld:** A Set or a Run (Section 3).
+* **Meld:** A "3" (Set) or a "4" (Run) (Section 3).
 * **Key Card:** A card in a player's hand that could legally extend a meld already on the table. Once it is placed on a meld it becomes part of that meld and is no longer a Key Card.
-* **Going Down:** Placing the Game Round's objective melds face-up on the table (Section 6).
+* **Going Down:** Placing the Game Round's objective melds from your hand face-up on the table (Section 6).
 * **Going Out:** Ending your turn with no cards in your hand (Section 6).
-* **Blocking:** Claiming a discard yourself so that a player further down the May-I queue cannot have it. Out of turn you block by calling May-I ahead of them (Section 5). A player who has gone down can no longer May-I, so they cannot block another player's May-I.
 
 ## 2. Setup & The Deal
 * **Players:** 3 or 4.
@@ -48,7 +47,7 @@ Unless interrupted by a May-I, a turn consists of:
 A May-I is the only way to take a discard when it is not your turn. Each player may call at most **3 May-Is per Game Round**.
 
 **Resolution Protocol (Priority Queue):**
-1. **Trigger:** A May-I opportunity opens only when the active player declines the top discard and chooses to draw from the Stock Pile. If the active player takes the discard, the opportunity is gone.
+1. **Trigger:** A May-I opportunity opens only when the active player declines the top discard and chooses to draw from the Stock Pile. If the active player takes the discard, the opportunity is gone. Choosing the Stock Pile is final: once a May-I is called, the active player cannot switch to taking the discard.
 2. **Eligibility:** The following players cannot May-I:
     * the active player;
     * the player who discarded the targeted card (there is none for the opening upcard);
@@ -73,8 +72,13 @@ The opening upcard can be May-I'd like any other discard.
 ## 7. Stock Exhaustion
 As soon as the Stock Pile becomes empty, all of the Discard Pile except its top card is shuffled to form a new Stock Pile. The top card stays face-up as the Discard Pile. The rebuild happens straight after whichever draw emptied the stock, so the stock is never empty when someone needs to draw from it. For example, if the stock holds one card when a May-I is called, the May-I caller takes that card. The stock is then rebuilt, and the active player draws from the new stock.
 
-## 8. Scoring
-The player who goes out scores **0 points**. Every other player scores penalty points for **each card still in their hand**. Cards already on the table do not count.
+## 8. Stalemate
+If every player is down and no card could be placed on any meld on the table, the Game Round ends immediately in a stalemate. This happens when every set holds all 8 cards of its rank, and every run end is either an Ace or both copies of the next card are already on the table.
+
+Every player scores **0 points** for a stalemated Game Round, whatever is left in their hand.
+
+## 9. Scoring
+Except after a stalemate (Section 8), the player who goes out scores **0 points** and every other player scores penalty points for **each card still in their hand**. Cards already on the table do not count.
 
 **Holding melds does not help:** Cards that form valid melds in a player's hand still count as penalty points if that player has not gone down and laid them on the table before the Game Round ends.
 
