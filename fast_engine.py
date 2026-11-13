@@ -187,10 +187,10 @@ class JoeEngine:
         if action == 1:  # PICK_DISCARD
             self.ctx.execute_pickup_discard()
         elif action == 0:  # PICK_STOCK
-            self.ctx.execute_pickup_stock()
-            self.ctx.start_may_i_checks()
+            self.ctx.choose_stock()
 
     def on_enter_processing_pickup(self):
+        self.ctx.draw_pending_stock_card()  # after any May-I (rules.md Section 5)
         self.evaluate_hand()
 
     def on_enter_may_i_check(self):

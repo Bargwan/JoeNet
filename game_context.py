@@ -103,6 +103,11 @@ class GameContext:
         self.may_i_target_idx = None
         # Who discarded the top card of the discard pile; None for the opening upcard.
         self.top_discarder_idx = None
+        # True between choosing the stock and drawing from it (while May-Is are offered).
+        self.stock_draw_pending = False
+        # Whether the top discard can be taken. False once it has been taken and the
+        # card beneath exposed: that card stays buried (see dead_cards).
+        self.top_discard_available = True
 
     # --- Turn Management ---
 
@@ -157,6 +162,8 @@ class GameContext:
             initial_discard = self.deck.pop(0)
             self.discard_pile.append(initial_discard)
         self.top_discarder_idx = None
+        self.stock_draw_pending = False
+        self.top_discard_available = True
 
     def rotate_player(self):
         self.active_player_idx = (self.active_player_idx + 1) % self.num_players
@@ -200,75 +207,80 @@ class GameContext:
         # Advance the tournament boundary marker
         self.current_round_idx += 1
 
-    def _replenish_deck_if_empty(self):
-        """Recycles the dead cards into a new stock pile if the deck runs out."""
-        if not self.deck and len(self.discard_pile) > 1:
-            # Save the top card to keep the discard pile alive
-            top_card = self.discard_pile.pop()
+    # --- Stock & discard pile ---
 
-            # The rest of the dead cards become the new deck
-            self.deck = self.discard_pile[:]
-            self.discard_pile = [top_card]
+    def _rebuild_stock_if_empty(self):
+        """
+        Rules.md Section 7: as soon as the stock is empty, every discard except the
+        top card is shuffled into a new stock. Called straight after each stock draw.
+        """
+        if self.deck or len(self.discard_pile) <= 1:
+            return
+        top_card = self.discard_pile.pop()
+        self.deck = self.discard_pile
+        self.discard_pile = [top_card]
+        random.shuffle(self.deck)
+        self.dead_cards.fill(0)
+        if not self.top_discard_available:
+            # An exposed card stays buried until it is covered again.
+            self._sync_ace(self.dead_cards, int(top_card.suit), int(top_card.rank), increment=True)
 
-            # Shuffle to prevent deterministic infinite loops
-            import random
-            random.shuffle(self.deck)
+    def _draw_from_stock(self):
+        """Takes the top stock card, rebuilding the stock at once if that emptied it."""
+        if not self.deck:
+            raise ValueError("Cannot draw from an empty stock.")
+        card = self.deck.pop()
+        self._rebuild_stock_if_empty()
+        return card
 
-            # Wipe the dead_cards tensor (Channel 20) because they are resurrected!
-            self.dead_cards.fill(0)
+    def _take_top_discard(self):
+        """
+        Takes the top discard. The card beneath it is exposed but stays buried: it was
+        buried when covered, and the active player's next discard covers it again.
+        """
+        if not self.discard_pile or not self.top_discard_available:
+            raise ValueError("The top discard cannot be taken.")
+        card = self.discard_pile.pop()
+        self.top_discard_available = False
+        return card
 
     def execute_pickup_discard(self):
-        """Moves the top card of the discard pile to the active player's hand."""
-        if not self.discard_pile:
-            raise ValueError("Cannot pick up from an empty discard pile.")
-
-        # Pop from the end of the list. Channel 3 is now effectively empty.
-        # We do NOT resurrect from self.dead_cards.
-        card = self.discard_pile.pop()
+        """The active player takes the top discard."""
+        card = self._take_top_discard()
         self.active_player.receive_cards([card])
+        self._record_action(self.player_pickup_counts, self.active_player_idx,
+                            int(card.suit), int(card.rank))
 
-        self._record_action(
-            self.player_pickup_counts,
-            self.active_player_idx,
-            int(card.suit),
-            int(card.rank)
-        )
+    def choose_stock(self):
+        """
+        The active player declines the discard and will draw from the stock.
+        Rules.md Section 5: the May-I is resolved first, then the active player
+        draws (see draw_pending_stock_card).
+        """
+        self.stock_draw_pending = True
+        self.start_may_i_checks()
+
+    def draw_pending_stock_card(self):
+        """Gives the active player their stock card once any May-I is resolved."""
+        if self.stock_draw_pending:
+            self.stock_draw_pending = False
+            self.execute_pickup_stock()
 
     def execute_pickup_stock(self):
-        """Moves the top card of the deck to the active player's hand."""
-        self._replenish_deck_if_empty()
-        if not self.deck:
-            raise ValueError("Cannot pick up from an empty deck.")
-
-        # Pop from the front of the list (top of the deck)
-        card = self.deck.pop()
-        self.active_player.receive_cards([card])
+        """The active player draws the top stock card."""
+        self.active_player.receive_cards([self._draw_from_stock()])
 
     def execute_may_i_call(self):
-        """Transfers the discard and a penalty stock card to the interrupter."""
-        if not self.discard_pile:
-            raise ValueError("Cannot May-I an empty discard pile.")
+        """The May-I caller takes the top discard plus the top stock card."""
+        discard_card = self._take_top_discard()
+        penalty_card = self._draw_from_stock()
 
-        self._replenish_deck_if_empty()
-        if not self.deck:
-            raise ValueError("Cannot draw penalty card; deck is empty.")
-
-        # Grab the prize and the penalty
-        discard_card = self.discard_pile.pop()
-        penalty_card = self.deck.pop(0)
-
-        # Give both to the target player
         interrupter = self.players[self.may_i_target_idx]
         interrupter.receive_cards([discard_card, penalty_card])
-
         interrupter.may_is_used += 1
 
-        self._record_action(
-            self.player_pickup_counts,
-            self.may_i_target_idx,
-            int(discard_card.suit),
-            int(discard_card.rank)
-        )
+        self._record_action(self.player_pickup_counts, self.may_i_target_idx,
+                            int(discard_card.suit), int(discard_card.rank))
 
     # --- Logic Helpers (Placeholders for later tasks) ---
     def check_hand_objective(self, player_idx):
@@ -507,20 +519,23 @@ class GameContext:
 
     def execute_discard(self, player_idx, card_index):
         """Moves a card from the player's hand to the discard pile, burying the old top card."""
+        # dead_cards holds every discard that can no longer be taken: everything in the
+        # pile except an available top card.
         player = self.players[player_idx]
         card_to_discard = player.hand_list[card_index]
 
         # 1. Remove from player's hand
         player.discard(int(card_to_discard.suit), int(card_to_discard.rank))
 
-        # 2. Bury the current top card into the dead_cards tensor (Channel 20)
-        if self.discard_pile:
+        # 2. Bury the current top card, unless it was already buried (exposed by a take)
+        if self.discard_pile and self.top_discard_available:
             old_top = self.discard_pile[-1]
             self._sync_ace(self.dead_cards, int(old_top.suit), int(old_top.rank), increment=True)
 
         # 3. Place new card on top of the list (Representing Channel 3)
         self.discard_pile.append(card_to_discard)
         self.top_discarder_idx = player_idx
+        self.top_discard_available = True
         self._record_action(
             self.player_discard_counts,
             player_idx,
@@ -602,6 +617,8 @@ class GameContext:
         new_ctx.current_round_idx = self.current_round_idx
         new_ctx.total_actions = self.total_actions
         new_ctx.top_discarder_idx = self.top_discarder_idx
+        new_ctx.stock_draw_pending = self.stock_draw_pending
+        new_ctx.top_discard_available = self.top_discard_available
 
         if hasattr(self, 'may_i_target_idx'):
             new_ctx.may_i_target_idx = self.may_i_target_idx
@@ -652,7 +669,7 @@ class GameContext:
 
         if state_id == 'pickup_decision':
             mask[PICK_STOCK] = True
-            if self.discard_pile:
+            if self.discard_pile and self.top_discard_available:
                 mask[PICK_DISCARD] = True
 
         elif state_id == 'may_i_decision':

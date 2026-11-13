@@ -514,7 +514,6 @@ def fresh_cards(n):
 
 
 @pytest.mark.parametrize("engine_cls", ENGINES)
-@xfail("Review item 6: the stock is rebuilt lazily, before the next draw")
 def test_stock_is_rebuilt_straight_after_the_draw_that_empties_it(engine_cls):
     ctx, engine = start_first_turn(engine_cls)
     last_stock, a, b, top = fresh_cards(4)
@@ -531,7 +530,6 @@ def test_stock_is_rebuilt_straight_after_the_draw_that_empties_it(engine_cls):
 
 
 @pytest.mark.parametrize("engine_cls", ENGINES)
-@xfail("Review item 6: the active player draws before the May-I is resolved")
 def test_may_i_caller_takes_the_last_stock_card(engine_cls):
     """The worked example in rules.md Section 7."""
     ctx, engine = start_first_turn(engine_cls)
@@ -549,3 +547,6 @@ def test_may_i_caller_takes_the_last_stock_card(engine_cls):
     assert ctx.discard_pile == [c]
     assert any(x is a or x is b for x in active.hand_list)
     assert len(ctx.deck) == 1
+    # c was exposed by the May-I, so it stays buried until the active player covers it.
+    assert ctx.dead_cards[:, :13].sum() == 1
+    assert ctx.dead_cards[int(c.suit), int(c.rank)] == 1

@@ -14,8 +14,9 @@ def verify_mass_integrity(test_case, ctx, expected_total=None):
     # 2. Discard Pile & Dead Cards Sync
     total_cards += len(ctx.discard_pile)
 
-    # dead_cards tensor should exactly equal discard list minus the top card
-    expected_dead = len(ctx.discard_pile) - 1 if ctx.discard_pile else 0
+    # dead_cards holds every discard except the top card, when the top can still be taken
+    top_available = bool(ctx.discard_pile) and getattr(ctx, 'top_discard_available', True)
+    expected_dead = len(ctx.discard_pile) - (1 if top_available else 0)
     actual_dead = np.sum(ctx.dead_cards[:, 0:13])
     test_case.assertEqual(
         expected_dead, actual_dead,

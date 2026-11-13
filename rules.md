@@ -39,7 +39,7 @@ Objectives are exact: a player goes down with exactly the required number of set
 
 ## 4. Standard Turn Flow
 Unless interrupted by a May-I, a turn consists of:
-1. **Pickup:** Take the top card of either the Stock Pile or the Discard Pile. A player may take the top discard and discard that same card later in the turn.
+1. **Pickup:** Take the top card of either the Stock Pile or the Discard Pile. A player may take the top discard and discard that same card later in the turn. Only the most recent discard can ever be taken: once a card is covered by another discard it stays buried, even if the card above it is later taken (by the active player or by a May-I). The active player's discard covers it again at the end of the turn.
 2. **Action (Optional):** Go down (if the objective is met) and/or, if already down (including earlier this turn), place Key Cards onto table melds.
 3. **Discard:** Place one card face-up on the Discard Pile. If the player has no cards left after the Action step, they have gone out and do not discard.
 

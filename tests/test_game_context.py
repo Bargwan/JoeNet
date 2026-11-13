@@ -58,15 +58,14 @@ class TestGameContextIntegrity(unittest.TestCase):
         self.assertEqual(len(p0.hand_list), 0, "Card should have moved to table.")
         self.assertEqual(self.ctx.table_sets[Suit.DIAMONDS, Rank.KING], 1)
 
-    def test_replenish_deck_on_empty_stock(self):
+    def test_stock_is_rebuilt_as_soon_as_it_empties(self):
         """
-        Verify that drawing from an empty stock correctly recycles
-        the discard pile, preserves the top discard, and wipes the dead_cards tensor.
+        Drawing the last stock card immediately recycles the discard pile,
+        preserves the top discard, and wipes the dead_cards tensor.
         """
-        # 1. SETUP: Force an empty stock
-        self.ctx.deck.clear()
+        last_stock = Card(Suit.CLUBS, Rank.KING)
+        self.ctx.deck[:] = [last_stock]
 
-        # Create a mock discard pile with exactly 4 cards
         cards = [
             Card(Suit.SPADES, Rank.TWO),
             Card(Suit.HEARTS, Rank.THREE),
@@ -74,37 +73,41 @@ class TestGameContextIntegrity(unittest.TestCase):
             Card(Suit.DIAMONDS, Rank.FIVE)  # This is the top card!
         ]
         self.ctx.discard_pile.extend(cards)
+        for card in cards[:-1]:
+            self.ctx._sync_ace(self.ctx.dead_cards, card.suit, card.rank, increment=True)
 
-        # Simulate that those buried cards were tracked in the dead_cards tensor
-        self.ctx.dead_cards[0, 1] = 1
-        self.ctx.dead_cards[1, 2] = 1
-
-        # 2. ACT: Active player (0) attempts to draw from the empty stock
         self.ctx.execute_pickup_stock()
 
-        # 3. ASSERT: Data Movement
-        # The player successfully received 1 card
-        self.assertEqual(
-            len(self.ctx.active_player.hand_list),
-            1,
-            "Player did not receive a card"
-        )
+        self.assertIs(self.ctx.active_player.hand_list[-1], last_stock)
+        self.assertEqual(len(self.ctx.discard_pile), 1)
+        self.assertIs(self.ctx.discard_pile[0], cards[-1], "Top discard card was not preserved!")
+        self.assertEqual(len(self.ctx.deck), 3, "Stock was not rebuilt from the buried discards")
+        self.assertEqual(np.sum(self.ctx.dead_cards), 0, "Dead cards tensor was not wiped clean!")
 
-        # The discard pile retains ONLY the top card (the 5 of Diamonds)
-        self.assertEqual(len(self.ctx.discard_pile), 1,
-                         "Discard pile should have exactly 1 card left")
-        self.assertEqual(self.ctx.discard_pile[0].rank, Rank.FIVE,
-                         "Top discard card was not preserved!")
+    def test_exposed_discard_stays_buried(self):
+        """
+        Taking the top discard exposes the card beneath, but nobody can take it:
+        it stays buried, and covering it again does not count it twice.
+        """
+        p0, p1 = self.ctx.players[0], self.ctx.players[1]
+        for rank in (Rank.TWO, Rank.THREE, Rank.FOUR):
+            p0.receive_cards([Card(Suit.SPADES, rank)])
+            self.ctx.execute_discard(0, len(p0.hand_list) - 1)
 
-        # The deck now has 2 cards remaining (4 original - 1 kept in discard - 1 drawn by player)
-        self.assertEqual(len(self.ctx.deck), 2, "Deck was not replenished correctly")
+        self.ctx.active_player_idx = 1
+        self.ctx.execute_pickup_discard()  # takes 4♠, exposing 3♠
 
-        # 4. ASSERT: Tensor Integrity
-        # The dead cards tensor MUST be completely zeroed out since those cards are back in play
-        self.assertEqual(
-            np.sum(self.ctx.dead_cards), 0, "Dead cards tensor was not wiped clean!"
-        )
+        self.assertEqual(self.ctx.dead_cards[Suit.SPADES, Rank.THREE], 1)
+        self.assertFalse(self.ctx.get_action_mask(1, 'pickup_decision')[1],
+                         "The exposed card must not be offered for pickup")
+        verify_mass_integrity(self, self.ctx)
 
+        p1.receive_cards([Card(Suit.HEARTS, Rank.NINE)])
+        self.ctx.execute_discard(1, len(p1.hand_list) - 1)  # covers 3♠ again
+
+        self.assertEqual(self.ctx.dead_cards[Suit.SPADES, Rank.THREE], 1)
+        self.assertEqual(self.ctx.dead_cards[:, :13].sum(), 2)
+        verify_mass_integrity(self, self.ctx)
 
 class TestGameContext(unittest.TestCase):
 

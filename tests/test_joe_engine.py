@@ -141,7 +141,7 @@ class TestJoeEngine(unittest.TestCase):
     def test_pickup_stock_logic(self):
         """
         Intent: Verify that choosing PICK_STOCK moves the top card of the deck
-        into the active player's hand.
+        into the active player's hand, after any May-I is resolved (rules.md Section 5).
         """
         # 1. Teleport the Data Layer
         self.ctx.active_player_idx = 0
@@ -160,10 +160,14 @@ class TestJoeEngine(unittest.TestCase):
         # 3. ACT: Fire the transition
         self.engine.resolve_pickup(0)
 
-        # 4. ASSERT: State Routing
+        # 4. ASSERT: The May-I is offered before the active player draws
         self.assertEqual(self.engine.state_id, "may_i_decision")
+        self.assertEqual(len(self.ctx.active_player.hand_list), 0)
+        self.assertEqual(len(self.ctx.deck), initial_deck_size)
 
-        # 5. ASSERT: Data Movement
+        # 5. Everyone passes; then the active player draws
+        while self.engine.state_id == "may_i_decision":
+            self.engine.resolve_may_i(3)
         self.assertEqual(len(self.ctx.deck), initial_deck_size - 1)
         self.assertEqual(len(self.ctx.active_player.hand_list), 1)
 
