@@ -653,19 +653,13 @@ def test_stalemate_ends_the_round_at_once_with_no_scores(engine_cls):
 @pytest.mark.parametrize("engine_cls", ENGINES)
 def test_round_cap_ends_the_round_after_max_turns_circuits(engine_cls):
     from agents import HeuristicAgent
-    from evaluate_arena import apply_engine_action
 
     ctx, engine = start_first_turn(engine_cls)
     ctx.config.max_turns = 1
     agents = [HeuristicAgent(random_seed=i) for i in range(4)]
     while ctx.current_round_idx == 0:
-        state = engine.state_id
-        if state == "start_turn":
-            engine.enter_pickup()
-            continue
-        idx = ctx.may_i_target_idx if state == "may_i_decision" else ctx.active_player_idx
-        action = agents[idx].select_action(state, ctx, idx, ctx.get_action_mask(idx, state))
-        apply_engine_action(engine, ctx, state, idx, action, agents[idx])
+        state, idx = engine.decider()
+        engine.apply(agents[idx].select_action(state, ctx, idx, ctx.legal_actions(idx, state)))
 
     assert ctx.last_round_result == 'cap'
     assert all(p.score > 0 for p in ctx.players)  # scored normally

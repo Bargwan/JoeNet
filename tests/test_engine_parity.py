@@ -110,25 +110,17 @@ class TestEngineParityAndBugs(unittest.TestCase):
         import random
 
         from agents import HeuristicAgent
-        from evaluate_arena import apply_engine_action
 
         def play(EngineClass, seed):
             random.seed(seed)
             ctx = GameContext(num_players=4, config=JoeConfig())
             engine = EngineClass(ctx)
             agents = [HeuristicAgent(random_seed=i) for i in range(4)]
-            engine.start_game()
-            while engine.state_id != 'game_over':
-                state = engine.state_id
-                if state == 'dealing':
-                    engine.deal_cards()
-                elif state == 'start_turn':
-                    engine.enter_pickup()
-                else:
-                    idx = ctx.may_i_target_idx if state == 'may_i_decision' else ctx.active_player_idx
-                    action = agents[idx].select_action(state, ctx, idx,
-                                                       ctx.get_action_mask(idx, state))
-                    apply_engine_action(engine, ctx, state, idx, action, agents[idx])
+            engine.advance()
+            while (decision := engine.decider()) is not None:
+                state, idx = decision
+                engine.apply(agents[idx].select_action(state, ctx, idx,
+                                                       ctx.legal_actions(idx, state)))
             return [p.score for p in ctx.players]
 
         self.assertEqual(play(FastEngine, 0), play(SlowEngine, 0))

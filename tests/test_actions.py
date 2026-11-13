@@ -19,7 +19,6 @@ from actions import (
 )
 from agents import HeuristicAgent
 from cards import Card, Rank, Suit
-from evaluate_arena import apply_engine_action
 from fast_engine import JoeEngine
 from game_context import (
     CALL_MAY_I,
@@ -58,16 +57,9 @@ def test_legal_actions_match_the_action_mask_throughout_a_game(num_players, seed
     agents = [HeuristicAgent(random_seed=i) for i in range(num_players)]
     checked = Counter()
 
-    engine.start_game()
-    while engine.state_id != 'game_over':
-        state = engine.state_id
-        if state == 'dealing':
-            engine.deal_cards()
-            continue
-        if state == 'start_turn':
-            engine.enter_pickup()
-            continue
-        idx = ctx.may_i_target_idx if state == 'may_i_decision' else ctx.active_player_idx
+    engine.advance()
+    while (decision := engine.decider()) is not None:
+        state, idx = decision
 
         mask = ctx.get_action_mask(idx, state)
         legal = ctx.legal_actions(idx, state)
@@ -75,8 +67,7 @@ def test_legal_actions_match_the_action_mask_throughout_a_game(num_players, seed
         assert len(legal) == len(set(legal)), f"duplicate legal actions in {state}"
         checked[state] += 1
 
-        action = agents[idx].select_action(state, ctx, idx, mask)
-        apply_engine_action(engine, ctx, state, idx, action, agents[idx])
+        engine.apply(agents[idx].select_action(state, ctx, idx, legal))
 
     assert set(checked) == {'pickup_decision', 'may_i_decision', 'go_down_decision',
                             'table_play_phase', 'discard_phase'}

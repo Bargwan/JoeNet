@@ -1,6 +1,6 @@
 """
-Agents that play Joe. Each agent picks an action number from the legal-action
-mask that GameContext.get_action_mask() builds for the current decision.
+Agents that play Joe. At each decision an agent is given the legal actions
+(GameContext.legal_actions(), see actions.py) and returns one of them.
 
 - RandomAgent:        picks any legal action.
 - HeuristicAgent:     the rule-based baseline.
@@ -12,26 +12,30 @@ import random
 
 import numpy as np
 
-from game_context import END_TABLE_PLAY, ON_SET, PLACE_BASE, decode_card_action, discard_action
+from actions import (
+    CallMayI,
+    Destination,
+    Discard,
+    EndTablePlay,
+    GoDown,
+    Pass,
+    PickDiscard,
+    PickStock,
+    Place,
+    Wait,
+)
 
 
 class Agent:
     """Base class for agents."""
 
-    def select_action(self, state_id, ctx, player_idx, action_mask):
+    def select_action(self, state_id, ctx, player_idx, legal):
         """
-        Returns the number of the action to take (see the action numbering in
-        game_context). `action_mask` is True for every legal action; the result
-        must be one of them. `state_id` names the decision, e.g. 'pickup_decision'.
+        Returns the action to take: one of `legal`, the list from
+        ctx.legal_actions(player_idx, state_id). `state_id` names the decision,
+        e.g. 'pickup_decision'.
         """
         raise NotImplementedError
-
-    def choose_go_down_melds(self, ctx, player_idx):
-        """
-        Which melds to lay when this agent goes down (see GameContext's meld format).
-        None lets the engine use the first valid combination.
-        """
-        return None
 
 
 class RandomAgent(Agent):
@@ -40,10 +44,9 @@ class RandomAgent(Agent):
     def __init__(self, random_seed=None):
         self.rng = random.Random(random_seed)
 
-    def select_action(self, state_id, ctx, player_idx, action_mask):
-        """Selects a completely random action from the allowed mask."""
-        valid_actions = np.where(action_mask)[0]
-        return self.rng.choice(valid_actions)
+    def select_action(self, state_id, ctx, player_idx, legal):
+        """Picks one of the legal actions at random."""
+        return self.rng.choice(legal)
 
 
 class HeuristicAgent(Agent):
@@ -56,7 +59,7 @@ class HeuristicAgent(Agent):
     def __init__(self, random_seed=None):
         self.rng = random.Random(random_seed)
 
-    def select_action(self, state_id, ctx, player_idx, action_mask):
+    def select_action(self, state_id, ctx, player_idx, legal):
         """
         Chooses an action with simple rules for each decision:
         - Pickup: take the discard if it fits the table (when down, or when holding
@@ -68,145 +71,127 @@ class HeuristicAgent(Agent):
         - Table play: place every Key Card, preferring runs (at random) to sets.
         - Discard: discard the card with the lowest synergy score.
         """
-        player = ctx.players[player_idx] if ctx and ctx.players else None
-        hand = player.hand_list if player else []
-        discard_top = ctx.discard_pile[-1] if ctx and ctx.discard_pile else None
+        player = ctx.players[player_idx]
+        hand = player.hand_list
+        discard_top = ctx.discard_pile[-1] if ctx.discard_pile else None
 
         # --- Phase: PICKUP DECISION ---
         if state_id == 'pickup_decision' and discard_top:
-            is_down = getattr(player, 'is_down', False)
+            can_take_discard = PickDiscard() in legal
 
-            # 1. Key-Card Hoarding: If we have the objective but aren't down, grab playable cards
-            if action_mask[1] and not is_down and ctx.check_hand_objective(player_idx):
+            # 1. Holding the objective but not down: take a discard that fits the table
+            if can_take_discard and not player.is_down and ctx.check_hand_objective(player_idx):
                 if self._is_playable_on_table(discard_top, ctx):
-                    return 1
+                    return PickDiscard()
 
-            # 2. Standard Pickup Logic
-            if is_down:
-                if action_mask[1] and self._is_playable_on_table(discard_top, ctx):
-                    return 1
-                elif action_mask[0]:
-                    return 0
-            else:
-                if action_mask[1]:
-                    if self._advances_objective(discard_top, player_idx, ctx):
-                        return 1
-                    elif self._is_useful_pickup(discard_top, player_idx, ctx):
-                        return 1
+            # 2. Standard pickup logic
+            if player.is_down:
+                if can_take_discard and self._is_playable_on_table(discard_top, ctx):
+                    return PickDiscard()
+            elif can_take_discard:
+                if self._advances_objective(discard_top, player_idx, ctx):
+                    return PickDiscard()
+                if self._is_useful_pickup(discard_top, player_idx, ctx):
+                    return PickDiscard()
 
-            # 3. Fallback (Draw from stock)
-            if action_mask[0]:
-                return 0
-            elif action_mask[1]:
-                return 1
+            # 3. Otherwise draw from the stock
+            return PickStock()
 
         # --- Phase: MAY-I DECISION ---
         elif state_id == 'may_i_decision' and discard_top:
-            if action_mask[2]:
-                # 1. The discard completes another meld towards the objective
-                if self._advances_objective(discard_top, player_idx, ctx):
-                    return 2
+            # 1. The discard completes another meld towards the objective
+            if self._advances_objective(discard_top, player_idx, ctx):
+                return CallMayI()
 
-                # 2. From Round 4 ([3, 3, 3]) on, also call for merely useful cards
-                if ctx.current_round_idx >= 3 and len(hand) <= 11:
-                    if self._is_useful_pickup(discard_top, player_idx, ctx):
-                        return 2
+            # 2. From Round 4 ([3, 3, 3]) on, also call for merely useful cards
+            if ctx.current_round_idx >= 3 and len(hand) <= 11:
+                if self._is_useful_pickup(discard_top, player_idx, ctx):
+                    return CallMayI()
 
-            if action_mask[3]:
-                return 3
+            return Pass()
 
         # --- Phase: GO DOWN DECISION ---
         elif state_id == 'go_down_decision':
-            if action_mask[4] and ctx.check_hand_objective(player_idx):
+            if any(isinstance(a, GoDown) for a in legal):
                 # Go down if it leaves 5 or fewer cards that can't be placed
                 if self._calculate_projected_deadwood(ctx, player_idx) <= 5:
-                    return 4
+                    return self._choose_go_down(ctx, player_idx, legal)
 
                 # Otherwise apply patience pressure
-                if action_mask[5]:
-                    go_down_prob = self._calculate_go_down_probability(ctx, player_idx)
-                    return 4 if self.rng.random() <= go_down_prob else 5
-                return 4
-            elif action_mask[5]:
-                return 5
+                go_down_prob = self._calculate_go_down_probability(ctx, player_idx)
+                if self.rng.random() <= go_down_prob:
+                    return self._choose_go_down(ctx, player_idx, legal)
+            return Wait()
 
         # --- Phase: TABLE PLAY DECISION ---
         elif state_id == 'table_play_phase':
             # Place every Key Card, one per decision. Prefer runs (chosen at random),
             # which tends to end rounds sooner; otherwise use a set.
-            run_plays, set_plays = [], []
-            for action in np.where(action_mask)[0]:
-                if action >= PLACE_BASE:
-                    _, _, destination = decode_card_action(action)
-                    (set_plays if destination == ON_SET else run_plays).append(int(action))
+            placements = sorted((a for a in legal if isinstance(a, Place)),
+                                key=lambda a: (a.destination, a.suit, a.rank))
+            run_plays = [a for a in placements if a.destination != Destination.ON_SET]
+            set_plays = [a for a in placements if a.destination == Destination.ON_SET]
             if run_plays:
                 return self.rng.choice(run_plays)
             if set_plays:
                 return set_plays[0]
-            return END_TABLE_PLAY
+            return EndTablePlay()
 
         # --- Phase: DISCARD DECISION ---
         elif state_id == 'discard_phase' and hand:
-            is_down = getattr(player, 'is_down', False)
             req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
             base_progress = self._get_objective_progress(player.private_hand, req_sets, req_runs,
                                                          ctx)
 
-            best_discard_idx = -1
+            best_discard = None
             lowest_synergy = float('inf')
 
             # After 15 circuits, add noise to break repeated discard cycles
             is_stuck = ctx.current_circuit > 15
 
             for card in hand:
-                action_idx = self._get_discard_action_idx(card)
-                if action_idx < len(action_mask) and action_mask[action_idx]:
+                synergy = self._calculate_synergy(card, hand, ctx, player_idx)
 
-                    synergy = self._calculate_synergy(card, hand, ctx, player_idx)
+                if is_stuck and 0 < synergy < 2000:
+                    synergy += self.rng.uniform(-40, 40)
 
-                    if is_stuck and 0 < synergy < 2000:
-                        synergy += self.rng.uniform(-40, 40)
+                # Never discard a card that the objective progress depends on
+                if not player.is_down and self._breaks_objective(card, player_idx, ctx,
+                                                                 base_progress):
+                    synergy += 10000
 
-                    # Never discard a card that the objective progress depends on
-                    if not is_down and self._breaks_objective(card, player_idx, ctx, base_progress):
-                        synergy += 10000
+                # Penalize high point values to dump heavy deadwood
+                deadwood_val = self._get_deadwood_value(card, ctx)
+                synergy -= (deadwood_val / 100.0)
 
-                    # Penalize high point values to dump heavy deadwood
-                    deadwood_val = self._get_deadwood_value(card, ctx)
-                    synergy -= (deadwood_val / 100.0)
+                if synergy < lowest_synergy:
+                    lowest_synergy = synergy
+                    best_discard = Discard(card.suit, card.rank)
 
-                    if synergy < lowest_synergy:
-                        lowest_synergy = synergy
-                        best_discard_idx = action_idx
-
-            if best_discard_idx != -1:
-                return best_discard_idx
+            if best_discard is not None:
+                return best_discard
 
         # --- FALLBACK ---
-        valid_actions = np.where(action_mask)[0]
-        if len(valid_actions) > 0:
-            return self.rng.choice(valid_actions)
-        return -1
+        return self.rng.choice(legal)
 
-    def choose_go_down_melds(self, ctx, player_idx):
+    def _choose_go_down(self, ctx, player_idx, legal):
         """
-        Lays the melds that leave the lowest penalty value in hand once every
-        placeable card has been placed. Ties are broken at random.
+        The GoDown (of those in `legal`) that leaves the lowest penalty value in
+        hand once every placeable card has been placed. Ties are broken at random.
         """
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-        options = ctx.find_all_melds(ctx.players[player_idx].private_hand, req_sets, req_runs)
-        if len(options) <= 1:
-            return options[0] if options else None
+        options = [a for a in legal if isinstance(a, GoDown)]
+        if len(options) == 1:
+            return options[0]
 
         scored = []
-        for melds in options:
+        for option in options:
             future = ctx.clone()
-            future.go_down(player_idx, melds)
+            future.go_down(player_idx, list(option.melds))
             future._place_key_cards(player_idx)
-            scored.append((future.hand_penalty(player_idx), melds))
+            scored.append((future.hand_penalty(player_idx), option))
 
         lowest = min(score for score, _ in scored)
-        return self.rng.choice([melds for score, melds in scored if score == lowest])
+        return self.rng.choice([option for score, option in scored if score == lowest])
 
     # ==========================================
     # DECISION HELPERS
@@ -409,10 +394,6 @@ class HeuristicAgent(Agent):
         if ctx._can_extend_run(suit, rank):
             return True
         return False
-
-    def _get_discard_action_idx(self, card):
-        """The action number for discarding this card."""
-        return discard_action(card.suit, card.rank)
 
 
 class ProbabilisticAgent(HeuristicAgent):
@@ -827,7 +808,7 @@ class ProbabilisticAgent(HeuristicAgent):
         p_lose = 1.0 - p_safe
         return max(0.01, min(0.99, p_lose))
 
-    def select_action(self, state_id, ctx, player_idx, action_mask):
+    def select_action(self, state_id, ctx, player_idx, legal):
         """
         Overrides the rule-based heuristics with a 1-Ply Stochastic Lookahead.
 
@@ -849,34 +830,31 @@ class ProbabilisticAgent(HeuristicAgent):
         # 1. PREDATORY DISCARD (1-Ply Lookahead)
         # ==========================================
         if state_id == 'discard_phase':
-            best_discard_idx = -1
+            best_discard = None
             best_future_ev = -float('inf')
 
-            # Simulate the future for every legally discardable card
+            # Simulate the future for every card in hand
             for card in player.hand_list:
-                action_idx = self._get_discard_action_idx(card)
-                if action_idx < len(action_mask) and action_mask[action_idx]:
+                # Create the hypothetical future (Hand MINUS this card)
+                hypo_tensor = hand_tensor.copy()
+                suit, rank = int(card.suit), int(card.rank)
+                ctx._sync_ace(hypo_tensor, suit, rank, increment=False)
 
-                    # Create the hypothetical future (Hand MINUS this card)
-                    hypo_tensor = hand_tensor.copy()
-                    suit, rank = int(card.suit), int(card.rank)
-                    ctx._sync_ace(hypo_tensor, suit, rank, increment=False)
+                # Ask the EV Engine how good this resulting hand is
+                future_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx)
 
-                    # Ask the EV Engine how good this resulting hand is
-                    future_ev = self._evaluate_hand_state(hypo_tensor, ctx, player_idx)
+                if future_ev > best_future_ev:
+                    best_future_ev = future_ev
+                    best_discard = Discard(card.suit, card.rank)
 
-                    if future_ev > best_future_ev:
-                        best_future_ev = future_ev
-                        best_discard_idx = action_idx
-
-            if best_discard_idx != -1:
-                return best_discard_idx
+            if best_discard is not None:
+                return best_discard
 
         # ==========================================
         # 2. PICKUP DECISION (Full Turn Lookahead)
         # ==========================================
         elif state_id == 'pickup_decision' and discard_top:
-            if action_mask[1]:
+            if PickDiscard() in legal:
                 baseline_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
 
                 # Step 1: Simulate the Pickup
@@ -900,19 +878,15 @@ class ProbabilisticAgent(HeuristicAgent):
 
                 # Only pick up the discard if it is worth at least 1 penalty point.
                 if best_post_discard_ev > baseline_ev + 1.0:
-                    return 1
+                    return PickDiscard()
 
-            if action_mask[0]:
-                return 0
+            return PickStock()
 
         # ==========================================
         # 3. MAY-I DECISION (The Virtual Turn Expansion)
         # ==========================================
-        elif state_id == 'may_i_decision' and discard_top and action_mask[2]:
-
-            if hasattr(ctx, 'may_i_target_idx') and ctx.may_i_target_idx is not None:
-                player_idx = ctx.may_i_target_idx
-
+        elif state_id == 'may_i_decision' and discard_top:
+            # player_idx is the player being offered the May-I
             hand_tensor = ctx.players[player_idx].private_hand
 
             # 1. Baseline: Hand as it is, with 0 offset
@@ -941,16 +915,14 @@ class ProbabilisticAgent(HeuristicAgent):
 
             # 3. Call if the extra card is worth more than the blind stock card costs
             if (pickup_ev - ev_cost_of_blind_card) > baseline_ev:
-                return 2
-
-            if action_mask[3]:
-                return 3
+                return CallMayI()
+            return Pass()
 
         # ==========================================
         # 4. GO DOWN DECISION (The Tactical Sandbag)
         # ==========================================
         elif state_id == 'go_down_decision':
-            if action_mask[4] and action_mask[5]:
+            if any(isinstance(a, GoDown) for a in legal):
 
                 # Option A: Wait (Sandbag). Our EV relies on keeping the table locked.
                 wait_ev = self._evaluate_hand_state(hand_tensor, ctx, player_idx)
@@ -967,20 +939,15 @@ class ProbabilisticAgent(HeuristicAgent):
                 # If unlocking the table destroys our reward probability more than it
                 # saves us in penalty risk, the bot will naturally choose to sandbag!
                 if go_down_ev > wait_ev:
-                    return 4
-                else:
-                    return 5
-
-            elif action_mask[4]:
-                return 4
-            return 5
+                    return self._choose_go_down(ctx, player_idx, legal)
+            return Wait()
 
         # ==========================================
         # 5. FALLBACK (Table Play & Edge Cases)
         # ==========================================
         # Let the base HeuristicAgent handle playing on table melds,
         # as those are strictly rule-bound actions that don't require EV simulation.
-        return super().select_action(state_id, ctx, player_idx, action_mask)
+        return super().select_action(state_id, ctx, player_idx, legal)
 
 
 class BayesianAgent(ProbabilisticAgent):

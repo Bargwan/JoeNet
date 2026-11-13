@@ -8,88 +8,42 @@ from dataclasses import dataclass
 
 from tqdm import tqdm
 
-from actions import (
-    CallMayI,
-    Discard,
-    EndTablePlay,
-    GoDown,
-    Pass,
-    PickDiscard,
-    PickStock,
-    Place,
-    Wait,
-)
+from actions import GoDown
 from fast_engine import JoeEngine
-from game_context import (
-    CALL_MAY_I,
-    END_TABLE_PLAY,
-    GO_DOWN,
-    PASS,
-    PICK_DISCARD,
-    PICK_STOCK,
-    WAIT,
-    GameContext,
-    discard_action,
-    place_action,
-)
+from game_context import GameContext
+from player import Player
 
 
 def _log_round_cap_hands(ctx):
-    """Dumps every player's hand to a log file when a round hits the max_turns safety net."""
-    log_file = "round_cap_tracker.log"
+    """
+    Appends every player's final hand to a log file after a round hit the
+    max_turns safety net. Call it once the round has been scored: it reads the
+    round's end state that calculate_scores() kept, since the next round has
+    already been dealt by then.
+    """
+    round_idx = ctx.current_round_idx - 1
+    req_sets, req_runs = ctx.config.objective_map[round_idx]
 
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"=== ROUND CAP REACHED (Circuit {ctx.current_circuit}) ===\n")
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx - 1]
-        f.write(f"Round {ctx.current_round_idx} Objective: {req_sets} Sets, {req_runs} Runs\n\n")
+    with open("round_cap_tracker.log", "a", encoding="utf-8") as f:
+        f.write(f"=== ROUND CAP REACHED (Circuit {ctx.last_round_circuits}) ===\n")
+        f.write(f"Round {round_idx + 1} Objective: {req_sets} Sets, {req_runs} Runs\n\n")
 
-        for p in ctx.players:
+        for player_id, (hand, is_down) in enumerate(zip(ctx.last_round_hands,
+                                                         ctx.last_round_down)):
             # Sorted by suit, then rank
-            sorted_hand = sorted(p.hand_list, key=lambda c: (int(c.suit), int(c.rank)))
-            hand_str = ", ".join([str(c) for c in sorted_hand])
+            sorted_hand = sorted(hand, key=lambda c: (int(c.suit), int(c.rank)))
+            hand_str = ", ".join(str(c) for c in sorted_hand)
 
-            has_obj = ctx.check_hand_objective(p.player_id)
+            counts = Player()
+            counts.receive_cards(hand)
+            has_obj = ctx.find_melds(counts.private_hand, req_sets, req_runs) is not None
 
-            f.write(f"Player {p.player_id} (Is Down: {p.is_down}):\n")
+            f.write(f"Player {player_id} (Is Down: {is_down}):\n")
             f.write(f"  Objective Met: {has_obj}\n")
-            f.write(f"  Hand ({len(p.hand_list)} cards): {hand_str}\n")
+            f.write(f"  Hand ({len(hand)} cards): {hand_str}\n")
             f.write("-" * 40 + "\n")
 
         f.write("\n\n")
-
-def apply_engine_action(engine: JoeEngine, ctx: GameContext, state_id: str, player_idx: int,
-                        action_idx: int, agent=None):
-    """
-    Temporary adapter while agents still return action numbers: converts the
-    number to the matching action object and plays it with engine.apply().
-    For GO_DOWN, the agent (if given) chooses the melds.
-    """
-    engine.apply(_action_from_number(ctx, state_id, player_idx, action_idx, agent))
-
-
-def _action_from_number(ctx, state_id, player_idx, number, agent):
-    legal = ctx.legal_actions(player_idx, state_id)
-    if state_id == 'go_down_decision' and number == GO_DOWN:
-        melds = agent.choose_go_down_melds(ctx, player_idx) if agent is not None else None
-        if melds is None:
-            return next(a for a in legal if isinstance(a, GoDown))
-        return GoDown(tuple(tuple(m) for m in melds))
-    for action in legal:
-        if _action_number(action, state_id) == number:
-            return action
-    raise ValueError(f"Action number {number} is not legal in {state_id}.")
-
-
-def _action_number(action, state_id):
-    """The old action number for an action object (temporary, see apply_engine_action)."""
-    if isinstance(action, Place):
-        return place_action(action.suit, action.rank, action.destination)
-    if isinstance(action, Discard):
-        return discard_action(action.suit, action.rank)
-    if isinstance(action, (Wait, EndTablePlay)):
-        return WAIT if state_id == 'go_down_decision' else END_TABLE_PLAY
-    return {PickStock: PICK_STOCK, PickDiscard: PICK_DISCARD, CallMayI: CALL_MAY_I,
-            Pass: PASS, GoDown: GO_DOWN}[type(action)]
 
 
 # =========================================================================
@@ -138,10 +92,10 @@ def _worker_simulate_single_game(config):
 
         agent = config.agents[active_idx]
 
-        mask = ctx.get_action_mask(active_idx, state_id)
-        action_idx = agent.select_action(state_id, ctx, active_idx, mask)
+        action = agent.select_action(state_id, ctx, active_idx,
+                                     ctx.legal_actions(active_idx, state_id))
 
-        if active_idx == 0 and state_id == 'go_down_decision' and action_idx == GO_DOWN:
+        if active_idx == 0 and isinstance(action, GoDown):
             agent_0_went_down_this_turn = True
 
         if state_id == 'discard_phase':
@@ -156,7 +110,7 @@ def _worker_simulate_single_game(config):
         turns_before = ctx.total_actions
         circuits_before = ctx.current_circuit
 
-        apply_engine_action(engine, ctx, state_id, active_idx, action_idx, agent)
+        engine.apply(action)
 
         if ctx.current_round_idx > prev_round_idx:
             round_turns.append(turns_before)

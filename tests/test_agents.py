@@ -1,11 +1,21 @@
 import unittest
 
-import numpy as np
-
+from actions import (
+    CallMayI,
+    Destination,
+    Discard,
+    EndTablePlay,
+    GoDown,
+    Pass,
+    PickDiscard,
+    PickStock,
+    Place,
+    Wait,
+)
 from agents import HeuristicAgent, RandomAgent
-from game_context import NUM_ACTIONS, GameContext
+from cards import Card, Rank, Suit
 from config import JoeConfig
-from cards import Card, Suit, Rank
+from game_context import GameContext
 
 
 class TestBaselineAgents(unittest.TestCase):
@@ -24,25 +34,20 @@ class TestBaselineAgents(unittest.TestCase):
             2: (0, 2)
         }
 
-    def test_random_agent_mask_compliance(self):
-        """Verify RandomAgent strictly selects actions where the mask is True."""
+    def test_random_agent_picks_legal_actions(self):
+        """Verify RandomAgent only picks legal actions, and does pick each of them."""
         agent = RandomAgent()
-
-        # Create a mock mask where only GO_DOWN (4) and WAIT (5) are valid
-        mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        mask[4] = True
-        mask[5] = True
+        go_down = GoDown((('set', Rank.SEVEN), ('set', Rank.ACE)))
+        legal = [go_down, Wait()]
 
         choices = set()
-        # Run 100 times to ensure it respects the mask and actually randomizes
+        # Run 100 times to ensure it stays legal and actually randomizes
         for _ in range(100):
-            action = agent.select_action(state_id='go_down_decision', ctx=None, player_idx=0,
-                                         action_mask=mask)
-            self.assertTrue(mask[action], f"RandomAgent chose an invalid action index: {action}")
+            action = agent.select_action('go_down_decision', None, 0, legal)
+            self.assertIn(action, legal, f"RandomAgent chose an illegal action: {action}")
             choices.add(action)
 
-        self.assertIn(4, choices, "RandomAgent never chose GO_DOWN.")
-        self.assertIn(5, choices, "RandomAgent never chose WAIT.")
+        self.assertEqual(choices, set(legal), "RandomAgent never chose one of the actions.")
 
     def test_heuristic_agent_smart_discard_objective_aware(self):
         """Verify Discard heuristic respects specific round objectives."""
@@ -60,30 +65,27 @@ class TestBaselineAgents(unittest.TestCase):
 
         p0.receive_cards([card_7h1, card_7h2, card_9s, card_10s])
 
-        idx_7h = agent._get_discard_action_idx(card_7h1)
-        idx_9s = agent._get_discard_action_idx(card_9s)
-        idx_10s = agent._get_discard_action_idx(card_10s)
-
-        mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        mask[idx_7h] = True
-        mask[idx_9s] = True
-        mask[idx_10s] = True
+        discard_7h = Discard(Suit.HEARTS, Rank.SEVEN)
+        discard_9s = Discard(Suit.SPADES, Rank.NINE)
+        discard_10s = Discard(Suit.SPADES, Rank.TEN)
 
         # --- Scenario A: Round 0 ([3,3] - Sets Only) ---
         ctx.current_round_idx = 0
-        action = agent.select_action('discard_phase', ctx, player_idx=0, action_mask=mask)
+        legal = ctx.legal_actions(0, 'discard_phase')
+        action = agent.select_action('discard_phase', ctx, 0, legal)
         self.assertIn(
             action,
-            [idx_9s, idx_10s],
+            [discard_9s, discard_10s],
             "In a [3,3] round, agent should discard run-synergy cards and keep the 7s."
         )
 
         # --- Scenario B: Round 2 ([4,4] - Runs Only) ---
         ctx.current_round_idx = 2
-        action = agent.select_action('discard_phase', ctx, player_idx=0, action_mask=mask)
+        legal = ctx.legal_actions(0, 'discard_phase')
+        action = agent.select_action('discard_phase', ctx, 0, legal)
         self.assertEqual(
             action,
-            idx_7h,
+            discard_7h,
             "In a [4,4] round, agent should discard set-synergy cards and keep the Spades."
         )
 
@@ -93,9 +95,7 @@ class TestBaselineAgents(unittest.TestCase):
         ctx = GameContext(num_players=4, config=self.config)
         p0 = ctx.players[0]
 
-        mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        mask[2] = True
-        mask[3] = True
+        legal = [CallMayI(), Pass()]
 
         def reset_hand_and_receive(cards):
             p0.hand_list.clear()
@@ -111,13 +111,13 @@ class TestBaselineAgents(unittest.TestCase):
             Card(Suit.SPADES, Rank.TEN),
             Card(Suit.SPADES, Rank.JACK)
         ])
-        action = agent.select_action('may_i_decision', ctx, player_idx=0, action_mask=mask)
-        self.assertEqual(action, 3, "In a [3,3] round, agent should PASS on a run-completing card.")
+        action = agent.select_action('may_i_decision', ctx, 0, legal)
+        self.assertEqual(action, Pass(), "In a [3,3] round, agent should PASS on a run-completing card.")
 
         ctx.discard_pile = [Card(Suit.HEARTS, Rank.SEVEN)]
         reset_hand_and_receive([Card(Suit.CLUBS, Rank.SEVEN), Card(Suit.DIAMONDS, Rank.SEVEN)])
-        action = agent.select_action('may_i_decision', ctx, player_idx=0, action_mask=mask)
-        self.assertEqual(action, 2, "In a [3,3] round, agent should CALL on a set-completing card.")
+        action = agent.select_action('may_i_decision', ctx, 0, legal)
+        self.assertEqual(action, CallMayI(), "In a [3,3] round, agent should CALL on a set-completing card.")
 
     # =========================================================================
     # Go-down probability (_calculate_go_down_probability)
@@ -203,14 +203,12 @@ class TestBaselineAgents(unittest.TestCase):
         ctx.discard_pile = [Card(Suit.SPADES, Rank.SEVEN)]
 
         # Action Mask: 0 (Draw Stock), 1 (Pickup Discard)
-        mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        mask[0] = True
-        mask[1] = True
+        legal = [PickStock(), PickDiscard()]
 
-        action = agent.select_action('pickup_decision', ctx, player_idx=0, action_mask=mask)
+        action = agent.select_action('pickup_decision', ctx, 0, legal)
         self.assertEqual(
             action,
-            1,
+            PickDiscard(),
             "Agent should pick up the 7 of Spades on its turn to build a partial 3-card run."
         )
 
@@ -235,14 +233,12 @@ class TestBaselineAgents(unittest.TestCase):
         ctx.discard_pile = [Card(Suit.SPADES, Rank.SEVEN)]
 
         # Action Mask: 2 (May-I Call), 3 (May-I Pass)
-        mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        mask[2] = True
-        mask[3] = True
+        legal = [CallMayI(), Pass()]
 
-        action = agent.select_action('may_i_decision', ctx, player_idx=0, action_mask=mask)
+        action = agent.select_action('may_i_decision', ctx, 0, legal)
         self.assertEqual(
             action,
-            3,
+            Pass(),
             "Agent should PASS on the May-I because 5-6-7 does not complete the 4-card objective."
         )
 
@@ -267,14 +263,12 @@ class TestBaselineAgents(unittest.TestCase):
         ctx.discard_pile = [Card(Suit.SPADES, Rank.EIGHT)]
 
         # Action Mask: 0 (Draw Stock), 1 (Pickup Discard)
-        mask = np.zeros(NUM_ACTIONS, dtype=bool)
-        mask[0] = True
-        mask[1] = True
+        legal = [PickStock(), PickDiscard()]
 
-        action = agent.select_action('pickup_decision', ctx, player_idx=0, action_mask=mask)
+        action = agent.select_action('pickup_decision', ctx, 0, legal)
         self.assertEqual(
             action,
-            1,
+            PickDiscard(),
             "Agent should pick up the 8 of Spades on its turn to build a 1-gapped run."
         )
 
@@ -297,23 +291,20 @@ class TestHeuristicTablePlay(unittest.TestCase):
             self.ctx.table_runs[Suit.SPADES, rank] = 1
 
     def choose(self):
-        mask = self.ctx.get_action_mask(0, 'table_play_phase')
-        return HeuristicAgent(random_seed=0).select_action('table_play_phase', self.ctx, 0, mask)
+        legal = self.ctx.legal_actions(0, 'table_play_phase')
+        return HeuristicAgent(random_seed=0).select_action('table_play_phase', self.ctx, 0, legal)
 
     def test_prefers_a_run_over_a_set(self):
-        from game_context import RUN_HIGH_END, place_action
         self.player.receive_cards([Card(Suit.SPADES, Rank.SEVEN)])
-        self.assertEqual(self.choose(), place_action(Suit.SPADES, Rank.SEVEN, RUN_HIGH_END))
+        self.assertEqual(self.choose(), Place(Suit.SPADES, Rank.SEVEN, Destination.RUN_HIGH_END))
 
     def test_uses_a_set_when_no_run_fits(self):
-        from game_context import ON_SET, place_action
         self.player.receive_cards([Card(Suit.HEARTS, Rank.SEVEN)])
-        self.assertEqual(self.choose(), place_action(Suit.HEARTS, Rank.SEVEN, ON_SET))
+        self.assertEqual(self.choose(), Place(Suit.HEARTS, Rank.SEVEN, Destination.ON_SET))
 
     def test_ends_table_play_when_nothing_fits(self):
-        from game_context import END_TABLE_PLAY
         self.player.receive_cards([Card(Suit.HEARTS, Rank.KING)])
-        self.assertEqual(self.choose(), END_TABLE_PLAY)
+        self.assertEqual(self.choose(), EndTablePlay())
 
 
 class TestHeuristicGoDownChoice(unittest.TestCase):
@@ -329,6 +320,12 @@ class TestHeuristicGoDownChoice(unittest.TestCase):
         return ctx
 
     @staticmethod
+    def choose(ctx, seed=0):
+        """The GoDown the HeuristicAgent picks from player 0's options."""
+        legal = ctx.legal_actions(0, 'go_down_decision')
+        return HeuristicAgent(random_seed=seed)._choose_go_down(ctx, 0, legal)
+
+    @staticmethod
     def three(rank):
         return [Card(s, rank) for s in (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS)]
 
@@ -336,22 +333,21 @@ class TestHeuristicGoDownChoice(unittest.TestCase):
         # Laying 9s and Kings leaves three 7s (15 points), the lowest possible.
         ctx = self.ctx_with_hand(self.three(Rank.SEVEN) + self.three(Rank.NINE)
                                  + self.three(Rank.KING))
-        melds = HeuristicAgent(random_seed=0).choose_go_down_melds(ctx, 0)
-        self.assertEqual(sorted(melds), [('set', Rank.NINE), ('set', Rank.KING)])
+        melds = self.choose(ctx)
+        self.assertEqual(melds, GoDown((('set', Rank.NINE), ('set', Rank.KING))))
 
     def test_counts_cards_it_can_place_straight_afterwards(self):
         # A fourth 7 makes laying the 7s better: the extra 7 goes onto the set.
         ctx = self.ctx_with_hand(self.three(Rank.SEVEN) + [Card(Suit.CLUBS, Rank.SEVEN)]
                                  + self.three(Rank.NINE) + self.three(Rank.TWO))
-        melds = HeuristicAgent(random_seed=0).choose_go_down_melds(ctx, 0)
-        self.assertEqual(sorted(melds), [('set', Rank.SEVEN), ('set', Rank.NINE)])
+        melds = self.choose(ctx)
+        self.assertEqual(melds, GoDown((('set', Rank.SEVEN), ('set', Rank.NINE))))
 
     def test_breaks_ties_at_random(self):
         # 9s, 10s and Jacks are all worth 10 points: every option leaves 30 points.
         ctx = self.ctx_with_hand(self.three(Rank.NINE) + self.three(Rank.TEN)
                                  + self.three(Rank.JACK))
-        chosen = {tuple(sorted(HeuristicAgent(random_seed=s).choose_go_down_melds(ctx, 0)))
-                  for s in range(20)}
+        chosen = {self.choose(ctx, seed) for seed in range(20)}
         self.assertGreater(len(chosen), 1)
 
 

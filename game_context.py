@@ -128,8 +128,13 @@ class GameContext:
         # Whether the top discard can be taken. False once it has been taken and the
         # card beneath exposed: that card stays buried (see dead_cards).
         self.top_discard_available = True
-        # How the last round ended: 'out', 'stalemate' or 'cap' (see calculate_scores).
+        # How the last round ended: 'out', 'stalemate' or 'cap' (see calculate_scores),
+        # with each player's final hand and down status, and the circuits it lasted.
+        # The next deal replaces the live hands, so these keep the round's end state.
         self.last_round_result = None
+        self.last_round_hands = []
+        self.last_round_down = []
+        self.last_round_circuits = 0
 
     # --- Turn Management ---
 
@@ -235,8 +240,9 @@ class GameContext:
 
     def calculate_scores(self):
         """
-        Scores the round (rules.md Sections 8 and 9), records how it ended in
-        last_round_result ('out', 'stalemate' or 'cap'), and advances to the next round.
+        Scores the round (rules.md Sections 8 and 9), records how it ended
+        (last_round_result: 'out', 'stalemate' or 'cap', plus the final hands),
+        and advances to the next round.
         A player who has gone out ended the round, so it is never a stalemate.
         """
         if any(not p.hand_list for p in self.players):
@@ -245,6 +251,10 @@ class GameContext:
             self.last_round_result = 'stalemate'
         else:
             self.last_round_result = 'cap'
+
+        self.last_round_hands = [list(p.hand_list) for p in self.players]
+        self.last_round_down = [p.is_down for p in self.players]
+        self.last_round_circuits = self.current_circuit
 
         if self.last_round_result != 'stalemate':
             for idx, player in enumerate(self.players):

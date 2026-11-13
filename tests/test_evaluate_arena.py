@@ -3,8 +3,8 @@ from unittest.mock import patch, MagicMock
 
 from agents import RandomAgent, HeuristicAgent
 from game_context import GameContext
-from cards import Card, Suit, Rank
-from evaluate_arena import TournamentConfig, TournamentRunner, apply_engine_action
+from evaluate_arena import TournamentConfig, TournamentRunner
+from fast_engine import JoeEngine
 
 
 class TestEvaluationArena(unittest.TestCase):
@@ -49,70 +49,30 @@ class TestEvaluationArena(unittest.TestCase):
         self.assertIsInstance(results["tournament_win_rate"], float)
         self.assertIsInstance(results["strategic_detonations"], float)
 
-    def test_apply_engine_action_converts_numbers_to_actions(self):
+    @patch.object(JoeEngine, 'apply', autospec=True)
+    def test_round_win_tracking_survives_the_next_deal(self, mock_apply):
         """
-        Verify the temporary adapter turns an agent's action number into the
-        matching action object and plays it with engine.apply().
+        Verify a round win and a down-and-out win are credited from the round
+        index, even though the next round's deal refills the hands at once.
         """
-        from actions import Discard, GoDown, PickStock
+        from actions import GoDown
 
-        ctx = GameContext(num_players=4)
-        mock_engine = MagicMock()
-        player = ctx.players[0]
-        player.hand_list.clear()
-        player.private_hand.fill(0)
-        # Two sets (7s and 9s) for the [3, 3] objective, plus a 10 of Hearts
-        player.receive_cards([Card(s, r) for r in (Rank.SEVEN, Rank.NINE)
-                              for s in (Suit.SPADES, Suit.CLUBS, Suit.DIAMONDS)]
-                             + [Card(Suit.HEARTS, Rank.TEN)])
-
-        # Control action 0 -> PickStock
-        apply_engine_action(mock_engine, ctx, 'pickup_decision', 0, 0)
-        mock_engine.apply.assert_called_with(PickStock())
-
-        # GO_DOWN with no agent -> the first way to go down
-        apply_engine_action(mock_engine, ctx, 'go_down_decision', 0, 4)
-        mock_engine.apply.assert_called_with(GoDown((('set', Rank.SEVEN), ('set', Rank.NINE))))
-
-        # GO_DOWN with an agent -> the agent's meld choice
-        chooser = MagicMock()
-        chooser.choose_go_down_melds.return_value = [('set', Rank.NINE), ('set', Rank.SEVEN)]
-        apply_engine_action(mock_engine, ctx, 'go_down_decision', 0, 4, agent=chooser)
-        mock_engine.apply.assert_called_with(GoDown((('set', Rank.NINE), ('set', Rank.SEVEN))))
-
-        # Discard action 28 = 6 + (Suit * 13) + Rank = 6 + 13 + 9 -> Discard 10 of Hearts
-        apply_engine_action(mock_engine, ctx, 'discard_phase', 0, 28)
-        mock_engine.apply.assert_called_with(Discard(Suit.HEARTS, Rank.TEN))
-
-        # Discarding a card the player doesn't hold (action 50) raises
-        with self.assertRaises(ValueError):
-            apply_engine_action(mock_engine, ctx, 'discard_phase', 0, 50)
-
-    @patch('evaluate_arena.apply_engine_action')
-    def test_transient_state_round_win_tracking(self, mock_apply):
-        """
-        Regression Test: Proves that a round win and Strategic Detonation
-        are tracked correctly by monitoring current_round_idx, circumventing the
-        transient hand-size bug where the engine instantly refills hands to 11.
-        """
-        # 1. SETUP: Create a tournament with Mock agents
+        # 1. SETUP: Mock agents that always choose to go down
         mock_agent = MagicMock()
+        mock_agent.select_action.return_value = GoDown(())
         config = TournamentConfig(
-            name="Transient State Test",
+            name="Round Win Tracking Test",
             agents=[mock_agent, mock_agent, mock_agent, mock_agent],
             num_games=1,
             rounds_per_game=1
         )
-
-        # Force the Mock Agent to always pick action 4 (GO_DOWN) when asked
-        mock_agent.select_action.return_value = 4
-
         runner = TournamentRunner(config)
 
-        # We hook into `apply_engine_action` to simulate the fast_engine transitions
-        def side_effect_apply(engine, ctx, state_id, player_idx, action_idx, agent=None):
-            # Force the active player to be Agent 0 so it gets the win credit
-            ctx.active_player_idx = 0
+        # Stand in for engine.apply: walk agent 0 through pickup -> go down -> discard -> out
+        def fake_apply(engine, action):
+            ctx = engine.ctx
+            state_id = engine.state_id
+            ctx.active_player_idx = 0  # agent 0 makes every following decision
 
             # Point at the engine's own state objects (never change their .id)
             if state_id == 'pickup_decision':
@@ -121,24 +81,45 @@ class TestEvaluationArena(unittest.TestCase):
                 engine.current_state = engine.discard_phase
             elif state_id == 'discard_phase':
                 ctx.current_round_idx += 1
-                ctx.players[0].hand_list = [MagicMock()] * 11
+                ctx.last_round_result = 'out'
+                ctx.players[0].hand_list = [MagicMock()] * 11  # as if already redealt
                 engine.current_state = engine.game_over
 
-        mock_apply.side_effect = side_effect_apply
+        mock_apply.side_effect = fake_apply
 
         # 2. ACT
         results = runner.simulate()
 
-        # 3. ASSERT: The tracking must survive the transient state reset
-        self.assertEqual(
-            results['round_win_rate'], 100.0,
-            "Failed to track round win! The runner is likely still falling for the transient hand-size trap."
-        )
-        self.assertEqual(
-            results['down_and_out_wins'], 1.0,
-            "Failed to track strategic detonation!"
-        )
+        # 3. ASSERT
+        self.assertEqual(results['round_win_rate'], 100.0, "Failed to track the round win!")
+        self.assertEqual(results['down_and_out_wins'], 1.0, "Failed to track the down-and-out win!")
 
+    def test_round_cap_log_records_the_rounds_final_hands(self):
+        """The round-cap log shows the hands the round ended with, not the next deal."""
+        import os
+        import tempfile
+
+        from evaluate_arena import _log_round_cap_hands
+
+        ctx = GameContext(num_players=3)
+        ctx.execute_deal()
+        ctx.total_actions = 300  # 100 circuits of 3 players
+        final_hand = sorted(ctx.players[0].hand_list, key=lambda c: (int(c.suit), int(c.rank)))
+        ctx.calculate_scores()
+        ctx.execute_deal()  # the engine deals the next round straight away
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                _log_round_cap_hands(ctx)
+                log = open("round_cap_tracker.log", encoding="utf-8").read()
+            finally:
+                os.chdir(cwd)
+
+        self.assertIn("Circuit 100", log)
+        self.assertIn("Round 1 Objective", log)
+        self.assertIn(", ".join(str(c) for c in final_hand), log)
 
     def test_each_round_is_scored_exactly_once(self):
         """A full game scores 7 rounds; the final round must not be scored again at game over."""
