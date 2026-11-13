@@ -8,7 +8,19 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from cards import create_double_deck
+from actions import (
+    CallMayI,
+    Destination,
+    Discard,
+    EndTablePlay,
+    GoDown,
+    Pass,
+    PickDiscard,
+    PickStock,
+    Place,
+    Wait,
+)
+from cards import Rank, Suit, create_double_deck
 from config import JoeConfig
 from player import Player
 
@@ -21,7 +33,7 @@ PICK_STOCK, PICK_DISCARD, CALL_MAY_I, PASS, GO_DOWN, WAIT = range(6)
 END_TABLE_PLAY = WAIT  # The same action ends table play.
 
 # Where a Key Card goes when placed on the table.
-ON_SET, RUN_LOW_END, RUN_HIGH_END = range(3)
+ON_SET, RUN_LOW_END, RUN_HIGH_END = Destination
 
 DISCARD_BASE = 6                   # 6..57: discard a card
 PLACE_BASE = DISCARD_BASE + 52     # 58..213: place a card on a set / run low end / run high end
@@ -695,6 +707,41 @@ class GameContext:
             else:  # 2 through 7
                 total += self.config.points_two_to_seven
         return total
+
+    def legal_actions(self, player_idx: int, state_id: str) -> list:
+        """
+        The actions (see actions.py) the player may take at this decision.
+        Each card appears once, however many copies of it the hand holds.
+        """
+        state_id = state_id.lower().replace(' ', '_').replace('-', '_')
+        player = self.players[player_idx]
+
+        if state_id == 'pickup_decision':
+            actions = [PickStock()]
+            if self.discard_pile and self.top_discard_available:
+                actions.append(PickDiscard())
+            return actions
+
+        if state_id == 'may_i_decision':
+            return [CallMayI(), Pass()]
+
+        if state_id == 'go_down_decision':
+            req_sets, req_runs = self.config.objective_map[self.current_round_idx]
+            options = self.find_all_melds(player.private_hand, req_sets, req_runs)
+            return [GoDown(tuple(melds)) for melds in options] + [Wait()]
+
+        faces = sorted({(int(c.suit), int(c.rank)) for c in player.hand_list})
+
+        if state_id == 'discard_phase':
+            return [Discard(Suit(suit), Rank(rank)) for suit, rank in faces]
+
+        if state_id == 'table_play_phase':
+            return [Place(Suit(suit), Rank(rank), destination)
+                    for suit, rank in faces
+                    for destination in self.placement_destinations(suit, rank)] \
+                + [EndTablePlay()]
+
+        raise ValueError(f"Cannot list legal actions for unknown state: {state_id}")
 
     def get_action_mask(self, player_idx: int, state_id: str) -> np.ndarray:
         """
