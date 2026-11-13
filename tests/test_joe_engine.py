@@ -312,7 +312,7 @@ class TestJoeEngine(unittest.TestCase):
         self.ctx.active_player_idx = 0
 
         # Build an INVALID hand.
-        # We give the player only pairs and singles, guaranteeing _search_melds fails.
+        # We give the player only pairs and singles, guaranteeing find_melds fails.
         bad_cards = [
             Card(Suit.HEARTS, Rank.SEVEN, deck_index=0),
             Card(Suit.DIAMONDS, Rank.SEVEN, deck_index=0),  # Just a pair of 7s
@@ -483,10 +483,10 @@ class TestJoeEngine(unittest.TestCase):
         """
         from cards import Rank, Suit
 
-        # 1. Setup Table: A run of 2-3-4 of Spades
-        self.ctx.table_runs[Suit.SPADES, Rank.TWO] = 1
-        self.ctx.table_runs[Suit.SPADES, Rank.THREE] = 1
-        self.ctx.table_runs[Suit.SPADES, Rank.FOUR] = 1
+        from game_context import TableRun
+
+        # 1. Setup Table: A run of 2-3-4-5 of Spades
+        self.ctx.runs_on_table.append(TableRun(Suit.SPADES, Rank.TWO, Rank.FIVE))
 
         # 2. Test Standard Extensions
         self.assertTrue(
@@ -494,17 +494,16 @@ class TestJoeEngine(unittest.TestCase):
             "Ace should connect to Two"
         )
         self.assertTrue(
-            self.ctx._can_extend_run(Suit.SPADES, Rank.FIVE),
-            "Five should connect to Four"
+            self.ctx._can_extend_run(Suit.SPADES, Rank.SIX),
+            "Six should connect to Five"
         )
         self.assertFalse(
-            self.ctx._can_extend_run(Suit.SPADES, Rank.SIX),
-            "Six is not adjacent to 2-3-4"
+            self.ctx._can_extend_run(Suit.SPADES, Rank.SEVEN),
+            "Seven is not adjacent to 2-3-4-5"
         )
 
-        # 3. Setup Table: A run of Queen-King of Hearts
-        self.ctx.table_runs[Suit.HEARTS, Rank.QUEEN] = 1
-        self.ctx.table_runs[Suit.HEARTS, Rank.KING] = 1
+        # 3. Setup Table: A run of Ten-King of Hearts
+        self.ctx.runs_on_table.append(TableRun(Suit.HEARTS, Rank.TEN, Rank.KING))
 
         # 4. Test Wrap-around (King to Ace)
         self.assertTrue(

@@ -95,7 +95,6 @@ def test_run_accepts_cards_at_either_end(card):
         pytest.param(Card(S, Rank.SIX), id="6♠ (duplicate of high end)"),
     ],
 )
-@xfail("Review item 1: duplicates of cards already in a run are accepted")
 def test_run_rejects_cards_that_do_not_extend_an_end(card):
     ctx = table_with_spade_run_3_to_6()
     assert not can_place(ctx, card)
@@ -120,7 +119,6 @@ def test_high_ace_run_does_not_wrap_to_two():
 
 
 @pytest.mark.parametrize("card", [Card(S, A), Card(S, K)], ids=str)
-@xfail("Review item 1: duplicates of cards already in a run are accepted")
 def test_high_ace_run_rejects_duplicates(card):
     assert not can_place(table_with_high_ace_run(), card)
 
@@ -138,12 +136,10 @@ def test_low_ace_run_does_not_wrap_to_king():
     assert not can_place(table_with_low_ace_run(), Card(S, K))
 
 
-@xfail("Review item 1: duplicates of cards already in a run are accepted")
 def test_low_ace_run_rejects_a_second_ace():
     assert not can_place(table_with_low_ace_run(), Card(S, A))
 
 
-@xfail("Review item 2: Ace refused on a King end while a 2 of that suit is on the table")
 def test_ace_extends_king_end_while_a_low_ace_run_is_also_on_the_table():
     # Round 3 [4, 4]: ♠A-2-3-4 and ♠10-J-Q-K.
     ctx = table_with(run(S, A, *ranks(2, 4)) + run(S, *ranks(10, 10), J, Q, K), round_idx=2)
@@ -169,7 +165,6 @@ def table_with_spade_run_9_to_q():
     return table_with(run(S, *ranks(9, 9), Rank.TEN, J, Q) + FILLER_SET_OF_9S, round_idx=1)
 
 
-@xfail("Review item 9: placing a King creates a phantom low Ace on the table")
 def test_auto_place_cards_conserves_cards():
     ctx = table_with_spade_run_9_to_q()
     ctx.players[0].receive_cards([Card(S, K)])
@@ -181,7 +176,6 @@ def test_auto_place_cards_conserves_cards():
     assert verify_mass_integrity(ctx=ctx, test_case=_Asserter()) == before
 
 
-@xfail("Review item 1 fix: auto_place_cards makes one pass, so card order matters")
 def test_auto_place_cards_places_cards_unlocked_by_earlier_placements():
     # ♠8 only fits after ♠7 is placed; hand order puts ♠8 first.
     ctx = table_with_spade_run_3_to_6()

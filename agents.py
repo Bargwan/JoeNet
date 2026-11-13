@@ -1,5 +1,6 @@
 import math
 import random
+from collections import Counter
 import numpy as np
 
 
@@ -164,8 +165,8 @@ class HeuristicAgent(Agent):
         hand = player.hand_list
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
-        has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
-        has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
+        has_sets = ctx.find_melds(player.private_hand, req_sets, 0) is not None
+        has_runs = ctx.find_melds(player.private_hand, 0, req_runs) is not None
 
         needs_sets = (req_sets > 0) and not has_sets
         needs_runs = (req_runs > 0) and not has_runs
@@ -214,8 +215,8 @@ class HeuristicAgent(Agent):
 
         # 2. Drafting Phase (Pre-Objective)
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-        has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
-        has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
+        has_sets = ctx.find_melds(player.private_hand, req_sets, 0) is not None
+        has_runs = ctx.find_melds(player.private_hand, 0, req_runs) is not None
 
         needs_sets = (req_sets > 0) and not has_sets
         needs_runs = (req_runs > 0) and not has_runs
@@ -243,17 +244,25 @@ class HeuristicAgent(Agent):
         player = ctx.players[player_idx]
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
-        success, ext_sets, ext_runs = ctx._search_melds(player.private_hand, req_sets, req_runs)
-        if not success:
+        melds = ctx.find_melds(player.private_hand, req_sets, req_runs)
+        if melds is None:
             return len(player.hand_list)
 
-        objective_tensor = ext_sets + ext_runs
-        remaining_count = 0
+        # Count how many copies of each card the objective melds use.
+        objective_cards = Counter()
+        for kind, a, b in melds:
+            if kind == 'run':
+                for pos in range(b, b + 4):
+                    objective_cards[(a, pos % 13)] += 1
+            else:
+                for suit in b:
+                    objective_cards[(suit, a)] += 1
 
+        remaining_count = 0
         for card in player.hand_list:
             suit, rank = int(card.suit), int(card.rank)
-            if objective_tensor[suit, rank] > 0:
-                objective_tensor[suit, rank] -= 1
+            if objective_cards[(suit, rank)] > 0:
+                objective_cards[(suit, rank)] -= 1
                 continue
             if self._is_playable_on_table(card, ctx):
                 continue
@@ -278,7 +287,7 @@ class HeuristicAgent(Agent):
         player = ctx.players[player_idx]
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
-        if ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=req_runs)[0]:
+        if ctx.find_melds(player.private_hand, req_sets, req_runs) is not None:
             return False
 
         base_progress = self._get_objective_progress(player.private_hand, req_sets, req_runs, ctx)
@@ -307,7 +316,7 @@ class HeuristicAgent(Agent):
             for s in range(min(total, req_sets), -1, -1):
                 r = total - s
                 if r <= req_runs:
-                    if ctx._search_melds(tensor, sets_needed=s, runs_needed=r)[0]:
+                    if ctx.find_melds(tensor, s, r) is not None:
                         return total
         return 0
 
@@ -432,8 +441,8 @@ class OpenHandAgent(HeuristicAgent):
             return int(base_synergy)
 
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-        has_sets = ctx._search_melds(player.private_hand, sets_needed=req_sets, runs_needed=0)[0]
-        has_runs = ctx._search_melds(player.private_hand, sets_needed=0, runs_needed=req_runs)[0]
+        has_sets = ctx.find_melds(player.private_hand, req_sets, 0) is not None
+        has_runs = ctx.find_melds(player.private_hand, 0, req_runs) is not None
 
         needs_sets = (req_sets > 0) and not has_sets
         needs_runs = (req_runs > 0) and not has_runs

@@ -1,11 +1,34 @@
 import itertools
 import random
+from dataclasses import dataclass
 
 import numpy as np
 
 from cards import create_double_deck
 from config import JoeConfig
 from player import Player
+
+ACE_LOW = 0
+ACE_HIGH = 13
+
+
+@dataclass(slots=True)
+class TableRun:
+    """
+    One run on the table, stored by its end positions.
+    Positions follow the 14-column tensor layout: 0 = Ace (low), 1 = Two, ...,
+    12 = King, 13 = Ace (high). A run can only grow at its ends (rules.md Section 6).
+    """
+    suit: int
+    low: int
+    high: int
+
+
+def _run_positions(rank: int) -> tuple:
+    """The run positions a card of this rank can occupy. An Ace (0 or 13) can be either end."""
+    if rank in (ACE_LOW, ACE_HIGH):
+        return (ACE_LOW, ACE_HIGH)
+    return (rank,)
 
 
 class GameContext:
@@ -28,6 +51,8 @@ class GameContext:
         # Public Game State Tensors (Spatial layers 1 and 2)
         self.table_sets = np.zeros((4, 14), dtype=np.int8)
         self.table_runs = np.zeros((4, 14), dtype=np.int8)
+        # Each run on the table as its own record; table_runs above is their running total.
+        self.runs_on_table: list[TableRun] = []
         self.dead_cards = np.zeros((4, 14), dtype=np.int8) # Channel 12
         self.player_discard_counts = np.zeros((4, 4, 14), dtype=np.int8)
         self.player_pickup_counts = np.zeros((4, 4, 14), dtype=np.int8)
@@ -63,6 +88,7 @@ class GameContext:
 
         self.table_sets.fill(0)
         self.table_runs.fill(0)
+        self.runs_on_table.clear()
         self.dead_cards.fill(0)
 
         self.player_discard_counts.fill(0)
@@ -203,8 +229,7 @@ class GameContext:
         hand_tensor = self.players[player_idx].private_hand
         req_sets, req_runs = self.config.objective_map[self.current_round_idx]
 
-        success, _, _ = self._search_melds(hand_tensor, req_sets, req_runs)
-        return success
+        return self.find_melds(hand_tensor, req_sets, req_runs) is not None
 
     def _record_action(self, count_tensor, player_idx, suit, rank):
         """Records a public action into the provided presence tensor."""
@@ -231,39 +256,30 @@ class GameContext:
             elif rank == 13:
                 tensor[suit, 0] = max(int(tensor[suit, 0]) - 1, 0)
 
-    def _search_melds(self, tensor, sets_needed, runs_needed):
+    def find_melds(self, tensor, sets_needed, runs_needed):
         """
-        Recursive DFS to find valid meld combinations.
-        Returns: (success_bool, extracted_sets_tensor, extracted_runs_tensor)
+        Recursive DFS for minimum-size melds (3-card sets, 4-card runs) meeting an objective.
+
+        Returns None if the hand cannot meet it, otherwise a list with one tuple per meld:
+          ('run', suit, start)  - 4 cards of `suit` at positions start..start+3
+                                  (position 0 = low Ace, 13 = high Ace)
+          ('set', rank, suits)  - 3 cards of `rank`, one per entry in `suits`
         """
         if sets_needed == 0 and runs_needed == 0:
-            return (
-                True,
-                np.zeros((4, 14), dtype=np.int8),
-                np.zeros((4, 14), dtype=np.int8)
-                )
+            return []
 
         # 1. Try extracting Runs
         if runs_needed > 0:
             for suit in range(4):
-                for start_rank in range(11):
-                    if np.all(tensor[suit, start_rank:start_rank + 4] >= 1):
+                for start in range(11):
+                    if np.all(tensor[suit, start:start + 4] >= 1):
                         new_tensor = tensor.copy()
-                        for r in range(start_rank, start_rank + 4):
+                        for r in range(start, start + 4):
                             self._sync_ace(new_tensor, suit, r)
 
-                        success, ext_sets, ext_runs = self._search_melds(new_tensor,
-                                                                         sets_needed,
-                                                                         runs_needed - 1)
-                        if success:
-                            # Reconstruct the run for the return tensor
-                            for r in range(start_rank, start_rank + 4):
-                                ext_runs[suit, r] += 1
-                                if r == 0:
-                                    ext_runs[suit, 13] += 1
-                                elif r == 13:
-                                    ext_runs[suit, 0] += 1
-                            return True, ext_sets, ext_runs
+                        rest = self.find_melds(new_tensor, sets_needed, runs_needed - 1)
+                        if rest is not None:
+                            return [('run', suit, start)] + rest
 
         # 2. Try extracting Sets
         if sets_needed > 0:
@@ -279,43 +295,33 @@ class GameContext:
                         for suit in combo:
                             self._sync_ace(new_tensor, suit, rank)
 
-                        success, ext_sets, ext_runs = self._search_melds(new_tensor,
-                                                                         sets_needed - 1,
-                                                                         runs_needed)
-                        if success:
-                            # Reconstruct the set for the return tensor
-                            for suit in combo:
-                                ext_sets[suit, rank] += 1
-                                if rank == 0:
-                                    ext_sets[suit, 13] += 1
-                                elif rank == 13:
-                                    ext_sets[suit, 0] += 1
-                            return True, ext_sets, ext_runs
+                        rest = self.find_melds(new_tensor, sets_needed - 1, runs_needed)
+                        if rest is not None:
+                            return [('set', rank, combo)] + rest
 
-        return False, None, None
-
-        # If we reach here, this branch failed. Backtrack.
-        return False, None
+        return None
 
     def go_down(self, player_idx):
         """Moves the required objective melds to the table."""
         player = self.players[player_idx]
         req_sets, req_runs = self.config.objective_map[self.current_round_idx]
 
-        # Search for the cards that meet the round objective
-        success, ext_sets, ext_runs = self._search_melds(player.private_hand, req_sets, req_runs)
+        melds = self.find_melds(player.private_hand, req_sets, req_runs)
+        if melds is None:
+            return
 
-        if success:
-            # Update public table tensors
-            self.table_sets += ext_sets
-            self.table_runs += ext_runs
-
-            # Remove specific cards from player list and tensor
-            combined = ext_sets + ext_runs
-            for suit in range(4):
-                for rank in range(13):
-                    for _ in range(combined[suit, rank]):
-                        player.discard(suit, rank)
+        for kind, a, b in melds:
+            if kind == 'run':
+                suit, start = a, b
+                for pos in range(start, start + 4):
+                    player.discard(suit, pos % 13)  # position 13 is the Ace
+                    self._sync_ace(self.table_runs, suit, pos % 13, increment=True)
+                self.runs_on_table.append(TableRun(suit, start, start + 3))
+            else:
+                rank, suits = a, b
+                for suit in suits:
+                    player.discard(suit, rank)
+                    self._sync_ace(self.table_sets, suit, rank, increment=True)
 
     def auto_place_cards(self, player_idx):
         """
@@ -335,68 +341,60 @@ class GameContext:
 
     def _place_key_cards(self, player_idx):
         """
-        Iterates through the player's remaining hand and identifies
-        any single cards that can extend existing sets or runs on the table.
+        Places every Key Card in the player's hand. Repeats until nothing more fits,
+        because placing one card can open a run end for another.
         """
         player = self.players[player_idx]
+        placed = True
+        while placed:
+            placed = False
+            for card in list(player.hand_list):
+                if self.is_key_card(int(card.suit), int(card.rank)):
+                    player.discard(int(card.suit), int(card.rank))
+                    self._place_on_table(int(card.suit), int(card.rank))
+                    placed = True
 
-        # We must iterate over a copy of the list because we will be modifying the hand
-        for card in list(player.hand_list):
-            suit = int(card.suit)
-            rank = int(card.rank)
+    def is_key_card(self, suit, rank):
+        """True if a card can legally be placed on some meld on the table."""
+        return bool(np.any(self.table_sets[:, rank % 13] > 0)) or self._can_extend_run(suit, rank)
 
-            # 1. Check Table Sets (Spatial Layer 1)
-            # If any card of this rank exists in Table Sets, we can add to it
-            if np.any(self.table_sets[:, rank] > 0):
-                player.discard(suit, rank)
-                self.table_sets[suit, rank] += 1
-                if rank == 0:
-                    self.table_sets[suit, 13] += 1  # Sync High Ace
-                continue  # Card is placed, move to next hand card
-
-            # 2. Check Table Runs (Spatial Layer 2)
-            # If the same suit has an adjacent rank in Table Runs, we can extend it
-            elif self._can_extend_run(suit, rank):
-                player.discard(suit, rank)
-                self.table_runs[suit, rank] += 1
-                if rank == 0:
-                    self.table_runs[suit, 13] += 1  # Sync High Ace
-                elif rank == 12:
-                    self.table_runs[suit, 0] += 1  # Sync Low Ace if King placed
+    def _extendable_run(self, suit, rank):
+        """
+        Returns (run, position) for the first table run this card extends, or None.
+        Runs grow only at their ends; a low Ace end (position 0) and a high Ace end
+        (position 13) are closed.
+        """
+        for run in self.runs_on_table:
+            if run.suit != suit:
+                continue
+            for pos in _run_positions(rank):
+                if pos == run.low - 1 or pos == run.high + 1:
+                    return run, pos
+        return None
 
     def _can_extend_run(self, suit, rank):
+        """True if this card can be placed at the end of a run on the table."""
+        return self._extendable_run(suit, rank) is not None
+
+    def _place_on_table(self, suit, rank):
         """
-        Checks if a specific suit/rank coordinate is adjacent to an existing run.
-        Strictly prevents King/Two wrap-around by checking for Ghost Aces.
+        Puts a card (already removed from a hand) onto a meld.
+        A set of that rank takes priority over a run (review item 3, pending decision).
         """
-        # Rank 1 (Two)
-        if rank == 1:
-            if self.table_runs[suit, 2] > 0: return True
-            # Can connect to Ace Low ONLY if King is not present
-            if self.table_runs[suit, 0] > 0 and self.table_runs[suit, 12] == 0: return True
-            return False
+        rank = rank % 13
+        if np.any(self.table_sets[:, rank] > 0):
+            self._sync_ace(self.table_sets, suit, rank, increment=True)
+            return
 
-        # Rank 12 (King)
-        if rank == 12:
-            if self.table_runs[suit, 11] > 0: return True
-            # Can connect to Ace High ONLY if Two is not present
-            if self.table_runs[suit, 13] > 0 and self.table_runs[suit, 1] == 0: return True
-            return False
-
-        # Rank 0 or 13 (Ace)
-        if rank == 0 or rank == 13:
-            # Can connect to Two ONLY if King is not present
-            if self.table_runs[suit, 1] > 0 and self.table_runs[suit, 12] == 0: return True
-            # Can connect to King ONLY if Two is not present
-            if self.table_runs[suit, 12] > 0 and self.table_runs[suit, 1] == 0: return True
-            return False
-
-        # Standard Case: 3 through Queen (Ranks 2 to 11)
-        if 1 < rank < 12:
-            if self.table_runs[suit, rank - 1] > 0 or self.table_runs[suit, rank + 1] > 0:
-                return True
-
-        return False
+        found = self._extendable_run(suit, rank)
+        if found is None:
+            raise ValueError(f"Card {suit}-{rank} does not fit any meld on the table.")
+        run, pos = found
+        if pos < run.low:
+            run.low = pos
+        else:
+            run.high = pos
+        self._sync_ace(self.table_runs, suit, rank, increment=True)
 
     def execute_discard(self, player_idx, card_index):
         """Moves a card from the player's hand to the discard pile, burying the old top card."""
@@ -421,28 +419,16 @@ class GameContext:
         )
 
     def execute_table_play(self, player_idx: int, card_index: int):
+        """Moves one Key Card from the player's hand onto a meld on the table."""
         player = self.players[player_idx]
-        card_to_play = player.hand_list.pop(card_index)
+        card = player.hand_list[card_index]
+        suit, rank = int(card.suit), int(card.rank)
 
-        # Re-sync private hand
-        player.private_hand.fill(0)
-        for c in player.hand_list:
-            suit, rank = int(c.suit), int(c.rank)
-            player.private_hand[suit, rank] += 1
-            if rank == 0:
-                player.private_hand[suit, 13] += 1
+        if not self.is_key_card(suit, rank):
+            raise ValueError(f"{card} is not a Key Card and cannot be placed.")
 
-        suit, rank = int(card_to_play.suit), int(card_to_play.rank)
-
-        # Route to the correct public tensor
-        if np.any(self.table_sets[:, rank] > 0):
-            self.table_sets[suit, rank] += 1
-            if rank == 0:
-                self.table_sets[suit, 13] += 1
-        elif self._can_extend_run(suit, rank):
-            self.table_runs[suit, rank] += 1
-            if rank == 0:
-                self.table_runs[suit, 13] += 1
+        player.discard(suit, rank)
+        self._place_on_table(suit, rank)
 
     def start_may_i_checks(self):
         """Initializes the May-I loop to the first downstream player."""
@@ -497,6 +483,7 @@ class GameContext:
         # Copy NumPy Tensors
         new_ctx.table_sets = self.table_sets.copy()
         new_ctx.table_runs = self.table_runs.copy()
+        new_ctx.runs_on_table = [TableRun(r.suit, r.low, r.high) for r in self.runs_on_table]
         new_ctx.dead_cards = self.dead_cards.copy()
 
         new_ctx.player_discard_counts = self.player_discard_counts.copy()
@@ -585,7 +572,7 @@ class GameContext:
             # Cards in hand are ONLY legal if they actually fit an existing meld
             for card in player.hand_list:
                 suit, rank = int(card.suit), int(card.rank)
-                if np.any(self.table_sets[:, rank] > 0) or self._can_extend_run(suit, rank):
+                if self.is_key_card(suit, rank):
                     card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
                     mask[card_idx] = True
 
