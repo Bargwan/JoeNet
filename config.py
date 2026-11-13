@@ -5,8 +5,7 @@ from typing import Dict, Tuple
 @dataclass
 class JoeConfig:
     """
-    Holds unscaled terminal point values, global game settings,
-    and Reinforcement Learning hyperparameters.
+    Holds penalty point values and global game settings.
     Injected into GameContext to decouple scoring math from core logic.
     """
     points_ace: int = 20
@@ -18,12 +17,8 @@ class JoeConfig:
     max_turns: int = 100
 
     # An "action" is an individual decision point (Pickup, May-I, Discard, etc.)
-    # Used strictly as an absolute engine failsafe against infinite RL loops.
+    # Used strictly as an absolute engine failsafe against infinite loops.
     max_actions: int = 1000
-
-    # RL Hyperparameters for Asymmetric Terminal Scoring
-    catch_up_multiplier: float = 2.0
-    pull_ahead_multiplier: float = 0.5
 
     # Round Index -> (Sets Needed, Runs Needed)
     objective_map: Dict[int, Tuple[int, int]] = field(default_factory=lambda: {

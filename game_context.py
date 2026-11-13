@@ -533,112 +533,18 @@ class GameContext:
 
         return oracle_tensor
 
-    def get_input_tensor(self, player_idx: int, state_id: str):
-        """
-        Generates the Information Set tensors for the Neural Network.
-        Returns: {'spatial': ndarray(13, 4, 14, int8), 'scalar': ndarray(28, float32)}
-        """
-        # --- NEW STRICT GUARD ---
-        valid_states = ['pickup_decision', 'may_i_decision', 'go_down_decision', 'table_play_phase',
-                        'discard_phase']
-        if state_id not in valid_states:
-            raise ValueError(
-                f"CRITICAL: get_input_tensor called with invalid or missing state_id: '{state_id}'")
-
-        # 1. Initialize LEAN 13-channel spatial tensor
-        spatial = np.zeros((13, 4, 14), dtype=np.int8)
-        scalar = np.zeros(28, dtype=np.float32)
-
-        target_player = self.players[player_idx]
-
-        # ==========================================
-        # SPATIAL TENSOR (Shape: 13, 4, 14)
-        # ==========================================
-
-        # Channel 0: Private Hand
-        spatial[0] = target_player.private_hand
-
-        # Channel 1 & 2: Table Melds
-        spatial[1] = self.table_sets
-        spatial[2] = self.table_runs
-
-        # Channel 3: Top Discard
-        if self.discard_pile:
-            top_card = self.discard_pile[-1]
-            suit = int(top_card.suit)
-            rank = int(top_card.rank)
-            self._sync_ace(spatial[3], suit, rank, increment=True)
-
-        # Channels 4-7: Discard History (Presence only)
-        # Channels 8-11: Pickup History (Presence only)
-        for i in range(4):
-            # Zero-pad Op3 if it's a 3-player game
-            if i == 3 and self.num_players == 3:
-                continue
-
-            target_idx = (player_idx + i) % self.num_players
-
-            # Map Discards to 4, 5, 6, 7
-            spatial[4 + i] = self.player_discard_counts[target_idx]
-
-            # Map Pickups to 8, 9, 10, 11
-            spatial[8 + i] = self.player_pickup_counts[target_idx]
-
-        # Channel 12: Dead Cards
-        spatial[12] = self.dead_cards
-
-        # ==========================================
-        # SCALAR TENSOR (Shape: 23)
-        # ==========================================
-
-        # --- SCALAR TENSOR (28 Features) ---
-        scalar = np.zeros(28, dtype=np.float32)
-
-        # 0-6: Round Objective (One-Hot)
-        scalar[self.current_round_idx] = 1.0
-
-        # 7: Circuit Progress (Strategic Turn Number)
-        max_circuits = getattr(self.config, 'max_turns', 15)
-        scalar[7] = min(self.current_circuit / 100.0, 1.0)
-
-        # 8: Stock Depth
-        scalar[8] = len(self.deck) / 104.0
-
-        # Relative Player Loop (Scores, Hand Sizes, May-Is)
-        for i in range(4):
-            # Zero-pad Op3 if it's a 3-player game
-            if i == 3 and self.num_players == 3:
-                continue
-
-            target_idx = (player_idx + i) % self.num_players
-            p = self.players[target_idx]
-
-            scalar[9 + i] = np.sqrt(p.score) / np.sqrt(1470.0)
-            scalar[13 + i] = len(p.hand_list) / 18.0
-            scalar[17 + i] = p.may_is_used / 3.0
-
-        # 21: Is Down?
-        scalar[21] = 1.0 if self.players[player_idx].is_down else 0.0
-
-        # 22: Is 3-Player Game?
-        scalar[22] = 1.0 if self.num_players == 3 else 0.0
-
-        # 23-27: Active Phase One-Hot
-        if state_id == 'pickup_decision':
-            scalar[23] = 1.0
-        elif state_id == 'may_i_decision':
-            scalar[24] = 1.0
-        elif state_id == 'go_down_decision':
-            scalar[25] = 1.0
-        elif state_id == 'table_play_phase':
-            scalar[26] = 1.0
-        elif state_id == 'discard_phase':
-            scalar[27] = 1.0
-
-        return {
-            'spatial': spatial,
-            'scalar': scalar
-        }
+    def hand_penalty(self, player_idx: int) -> int:
+        """Penalty points for the cards currently in a player's hand (rules.md Section 9)."""
+        total = 0
+        for card in self.players[player_idx].hand_list:
+            rank_val = int(card.rank)
+            if rank_val == 0:  # Ace
+                total += self.config.points_ace
+            elif 7 <= rank_val <= 12:  # 8 through King
+                total += self.config.points_eight_to_king
+            else:  # 2 through 7
+                total += self.config.points_two_to_seven
+        return total
 
     def get_action_mask(self, player_idx: int, state_id: str) -> np.ndarray:
         """

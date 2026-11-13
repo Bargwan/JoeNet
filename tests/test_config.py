@@ -29,28 +29,6 @@ class TestConfigurationInjection(unittest.TestCase):
                          50,
                          "GameContext did not store the injected config.")
 
-    def test_asymmetric_multipliers(self):
-        """
-        Ensures that the RL asymmetric scoring multipliers are present,
-        have the correct defaults, and can be overridden.
-        """
-        # Test Defaults
-        default_config = JoeConfig()
-        self.assertTrue(hasattr(default_config, "catch_up_multiplier"),
-                        "Missing catch_up_multiplier")
-        self.assertTrue(hasattr(default_config, "pull_ahead_multiplier"),
-                        "Missing pull_ahead_multiplier")
-
-        self.assertEqual(default_config.catch_up_multiplier, 2.0,
-                         "catch_up_multiplier default should be 2.0")
-        self.assertEqual(default_config.pull_ahead_multiplier, 0.5,
-                         "pull_ahead_multiplier default should be 0.5")
-
-        # Test Overrides
-        custom_config = JoeConfig(catch_up_multiplier=3.0, pull_ahead_multiplier=0.1)
-        self.assertEqual(custom_config.catch_up_multiplier, 3.0)
-        self.assertEqual(custom_config.pull_ahead_multiplier, 0.1)
-
     def test_turn_and_action_limits(self):
         """
         Verify config cleanly separates board circuits (turns)

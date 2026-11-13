@@ -1,10 +1,6 @@
 import math
 import random
 import numpy as np
-import onnxruntime as ort
-
-# Global cache to hold models in the multiprocessing worker's local RAM
-_global_onnx_sessions = {}
 
 
 class Agent:
@@ -1114,46 +1110,3 @@ class BayesianAgent(ProbabilisticAgent):
           suit/rank probabilities after every turn.
     """
     pass
-
-
-class ONNXAgent(Agent):
-    """
-    An adapter that allows evaluate_arena.py to seamlessly play an ONNX neural network.
-    Uses lazy-loading to survive being pickled across multiprocessing boundaries.
-    """
-
-    def __init__(self, onnx_path: str):
-        self.onnx_path = onnx_path
-
-    def select_action(self, state_id, ctx, player_idx, action_mask):
-        global _global_onnx_sessions
-
-        # 1. Lazy-Load the Model (Happens exactly ONCE per CPU core)
-        if self.onnx_path not in _global_onnx_sessions:
-            sess_options = ort.SessionOptions()
-            sess_options.intra_op_num_threads = 1
-            sess_options.inter_op_num_threads = 1
-            _global_onnx_sessions[self.onnx_path] = ort.InferenceSession(self.onnx_path,
-                                                                         sess_options)
-
-        session = _global_onnx_sessions[self.onnx_path]
-
-        # 2. Extract and format the tensors
-        nn_inputs = ctx.get_input_tensor(player_idx, state_id)
-        spatial_ort = np.expand_dims(nn_inputs['spatial'], axis=0).astype(np.float32)
-        scalar_ort = np.expand_dims(nn_inputs['scalar'], axis=0).astype(np.float32)
-        mask_ort = np.expand_dims(action_mask, axis=0).astype(np.bool_)
-
-        ort_inputs = {
-            'spatial': spatial_ort,
-            'scalar': scalar_ort,
-            'mask': mask_ort
-        }
-
-        # 3. Inference
-        outputs = session.run(None, ort_inputs)
-        logits = outputs[0][0]
-
-        # 4. Mask and Select
-        logits[~action_mask] = -1e9
-        return int(np.argmax(logits))

@@ -158,68 +158,6 @@ class TestGameContext(unittest.TestCase):
         expected_remaining = 104 - 44 - 1
         self.assertEqual(len(ctx.deck), expected_remaining, "Deck count incorrect after deal")
 
-    def test_get_input_tensor_phase_encoding(self):
-        """
-        Task 12: Verify the 28-feature scalar tensor correctly
-        handles Phase One-Hot Encoding, 3-Player zero-padding, and dtype bounds.
-        """
-        import numpy as np
-
-        # Initialize a 3-player game to test zero-padding
-        ctx = GameContext(num_players=3)
-        ctx.current_round_idx = 4
-
-        # MOCK: 30 actions in a 3-player game = 10 circuits
-        ctx.total_actions = 30
-
-        # Mock some player data
-        ctx.players[0].is_down = True
-        ctx.players[0].score = 100
-
-        # ACT: Generate tensor for Player 0 in the 'table_play_phase'
-        tensors = ctx.get_input_tensor(player_idx=0, state_id='table_play_phase')
-
-        # Test 12a: Structure
-        self.assertIn('spatial', tensors, "Dictionary must contain 'spatial' key")
-        self.assertIn('scalar', tensors, "Dictionary must contain 'scalar' key")
-
-        spatial = tensors['spatial']
-        scalar = tensors['scalar']
-
-        # Test 12b: Spatial Properties
-        self.assertEqual(spatial.shape, (13, 4, 14), "Spatial tensor shape mismatch.")
-        self.assertEqual(spatial.dtype, np.int8, "Spatial tensor must be strictly int8.")
-
-        # Test 12c: Scalar Properties
-        self.assertEqual(scalar.shape, (28,), "Scalar tensor must have exactly 28 features.")
-        self.assertEqual(scalar.dtype, np.float32, "Scalar tensor must be strictly float32.")
-
-        # Test 12d: Normalization Bounds
-        self.assertTrue((scalar >= 0.0).all() and (scalar <= 1.0).all(),
-                        "All scalar values must be normalized [0, 1].")
-
-        # Test 12e: 3-Player Zero Padding
-        self.assertEqual(scalar[22], 1.0, "Feature 22 (Is 3-Player) should be 1.0")
-        self.assertEqual(scalar[12], 0.0, "Op3 Score (index 12) should be 0.0 padded")
-        self.assertEqual(scalar[16], 0.0, "Op3 Hand Size (index 16) should be 0.0 padded")
-        self.assertEqual(scalar[20], 0.0, "Op3 May-Is (index 20) should be 0.0 padded")
-
-        self.assertEqual(np.sum(spatial[7]), 0,
-                         "Op3 Discard channel (7) must be completely zeroed out.")
-        self.assertEqual(np.sum(spatial[11]), 0,
-                         "Op3 Pickup channel (11) must be completely zeroed out.")
-
-        # Ensure Op3 spatial history (channels 16-19) is completely blanked out
-        self.assertEqual(np.sum(spatial[16:20]), 0,
-                         "Op3 spatial channels must be completely zeroed out.")
-
-        # Test 12f: Phase One-Hot (table_play_phase is index 26)
-        self.assertEqual(scalar[26], 1.0, "Index 26 should be hot (1.0) for table_play_phase")
-        self.assertEqual(scalar[23], 0.0, "Index 23 (Pickup) should be cold (0.0)")
-        self.assertEqual(scalar[27], 0.0, "Index 27 (Discard) should be cold (0.0)")
-
-
-class TestMeldValidation(unittest.TestCase):
     def setUp(self):
         self.config = JoeConfig()
         self.context = GameContext(num_players=4, config=self.config)
@@ -490,126 +428,20 @@ class TestMeldValidation(unittest.TestCase):
 
 
 
-class TestSpatialTensorMapping(unittest.TestCase):
-    """
-    Rigorously verifies that the GameContext.get_input_tensor method
-    correctly maps internal game state to the 13-channel spatial tensor.
-    """
+class TestHandPenalty(unittest.TestCase):
 
-    def setUp(self):
-        self.ctx = GameContext(num_players=4)
-        # Prevent the engine from dealing random cards so we have a pure blank slate
-        self.ctx.deck.clear()
-
-    def test_channel_0_private_hand(self):
-        """Verify Channel 0 correctly mirrors the active player's hand."""
-        self.ctx.players[0].receive_cards([Card(Suit.HEARTS, Rank.SEVEN)])
-
-        spatial = self.ctx.get_input_tensor(player_idx=0, state_id='pickup_decision')['spatial']
-
-        self.assertEqual(spatial[0, Suit.HEARTS.value, Rank.SEVEN.value], 1)
-        self.assertEqual(np.sum(spatial[0]), 1, "Only one card should be in the hand channel.")
-
-    def test_channels_1_and_2_table_melds(self):
-        """Verify Channels 1 and 2 mirror the public table tensors."""
-        self.ctx.table_sets[Suit.SPADES.value, Rank.KING.value] = 1
-        self.ctx.table_runs[Suit.CLUBS.value, Rank.FIVE.value] = 1
-
-        spatial = self.ctx.get_input_tensor(player_idx=0, state_id='pickup_decision')['spatial']
-
-        self.assertEqual(spatial[1, Suit.SPADES.value, Rank.KING.value], 1)
-        self.assertEqual(spatial[2, Suit.CLUBS.value, Rank.FIVE.value], 1)
-
-    def test_channel_3_top_discard(self):
-        """Verify Channel 3 captures ONLY the literal top card of the discard pile."""
-        self.ctx.discard_pile.append(Card(Suit.DIAMONDS, Rank.TWO))
-        self.ctx.discard_pile.append(Card(Suit.HEARTS, Rank.NINE))  # This is the top
-
-        spatial = self.ctx.get_input_tensor(player_idx=0, state_id='pickup_decision')['spatial']
-
-        self.assertEqual(spatial[3, Suit.HEARTS.value, Rank.NINE.value], 1)
-        self.assertEqual(spatial[3, Suit.DIAMONDS.value, Rank.TWO.value], 0,
-                         "Buried card appeared in Top Discard!")
-        self.assertEqual(np.sum(spatial[3, :, 1:13]), 1, "There should only be one top discard.")
-
-    def test_channels_4_to_7_relative_discard_history(self):
-        """
-        Verify Discard History is mapped relatively.
-        If we ask for Player 1's perspective:
-        Ch 4 = Self (P1), Ch 5 = Op1 (P2), Ch 6 = Op2 (P3), Ch 7 = Op3 (P0).
-        """
-        # Inject mock discard data for all 4 players
-        self.ctx.player_discard_counts[0, Suit.SPADES.value, Rank.TWO.value] = 1
-        self.ctx.player_discard_counts[1, Suit.HEARTS.value, Rank.THREE.value] = 1
-        self.ctx.player_discard_counts[2, Suit.CLUBS.value, Rank.FOUR.value] = 1
-        self.ctx.player_discard_counts[3, Suit.DIAMONDS.value, Rank.FIVE.value] = 1
-
-        # ACT: Get vision from Player 1's perspective
-        spatial = self.ctx.get_input_tensor(player_idx=1, state_id='pickup_decision')['spatial']
-
-        # ASSERT
-        self.assertEqual(spatial[4, Suit.HEARTS.value, Rank.THREE.value], 1,
-                         "Ch 4 (Self) should be Player 1's discard")
-        self.assertEqual(spatial[5, Suit.CLUBS.value, Rank.FOUR.value], 1,
-                         "Ch 5 (Op1/Left) should be Player 2's discard")
-        self.assertEqual(spatial[6, Suit.DIAMONDS.value, Rank.FIVE.value], 1,
-                         "Ch 6 (Op2/Across) should be Player 3's discard")
-        self.assertEqual(spatial[7, Suit.SPADES.value, Rank.TWO.value], 1,
-                         "Ch 7 (Op3/Right) should be Player 0's discard")
-
-    def test_channels_8_to_11_relative_pickup_history(self):
-        """
-        Verify Pickup History is mapped relatively.
-        If we ask for Player 3's perspective:
-        Ch 8 = Self (P3), Ch 9 = Op1 (P0), Ch 10 = Op2 (P1), Ch 11 = Op3 (P2).
-        """
-        # Inject mock pickup data for all 4 players
-        self.ctx.player_pickup_counts[0, Suit.SPADES.value, Rank.TWO.value] = 1
-        self.ctx.player_pickup_counts[1, Suit.HEARTS.value, Rank.THREE.value] = 1
-        self.ctx.player_pickup_counts[2, Suit.CLUBS.value, Rank.FOUR.value] = 1
-        self.ctx.player_pickup_counts[3, Suit.DIAMONDS.value, Rank.FIVE.value] = 1
-
-        # ACT: Get vision from Player 3's perspective
-        spatial = self.ctx.get_input_tensor(player_idx=3, state_id='pickup_decision')['spatial']
-
-        # ASSERT
-        self.assertEqual(spatial[8, Suit.DIAMONDS.value, Rank.FIVE.value], 1,
-                         "Ch 8 (Self) should be Player 3's pickup")
-        self.assertEqual(spatial[9, Suit.SPADES.value, Rank.TWO.value], 1,
-                         "Ch 9 (Op1/Left) should be Player 0's pickup")
-        self.assertEqual(spatial[10, Suit.HEARTS.value, Rank.THREE.value], 1,
-                         "Ch 10 (Op2/Across) should be Player 1's pickup")
-        self.assertEqual(spatial[11, Suit.CLUBS.value, Rank.FOUR.value], 1,
-                         "Ch 11 (Op3/Right) should be Player 2's pickup")
-
-    def test_channel_12_dead_cards(self):
-        """Verify Channel 12 mirrors the dead_cards tensor."""
-        self.ctx.dead_cards[Suit.SPADES.value, Rank.ACE.value] = 1
-
-        spatial = self.ctx.get_input_tensor(player_idx=0, state_id='pickup_decision')['spatial']
-
-        self.assertEqual(spatial[12, Suit.SPADES.value, Rank.ACE.value], 1)
-
-    def test_3_player_zero_padding(self):
-        """
-        Verify that in a 3-player game, the Op3 channels (7 and 11)
-        are strictly zero-padded, even if data leaks into the underlying matrices.
-        """
-        ctx_3p = GameContext(num_players=3)
-        ctx_3p.deck.clear()
-
-        # Inject rogue data into the 4th player slot (which shouldn't exist)
-        ctx_3p.player_discard_counts[3, Suit.SPADES.value, Rank.ACE.value] = 1
-        ctx_3p.player_pickup_counts[3, Suit.HEARTS.value, Rank.KING.value] = 1
-
-        # ACT: Get vision from Player 0
-        spatial = ctx_3p.get_input_tensor(player_idx=0, state_id='pickup_decision')['spatial']
-
-        # ASSERT: Channels 7 and 11 MUST be empty
-        self.assertEqual(np.sum(spatial[7]), 0,
-                         "Op3 Discard Channel was not zero-padded in a 3P game!")
-        self.assertEqual(np.sum(spatial[11]), 0,
-                         "Op3 Pickup Channel was not zero-padded in a 3P game!")
+    def test_hand_penalty_scores_each_rank_band(self):
+        """Aces score 20, 8 through King 10, and 2 through 7 score 5."""
+        ctx = GameContext(num_players=3)
+        ctx.players[0].hand_list.clear()
+        ctx.players[0].receive_cards([
+            Card(Suit.SPADES, Rank.ACE),
+            Card(Suit.HEARTS, Rank.KING),
+            Card(Suit.CLUBS, Rank.EIGHT),
+            Card(Suit.DIAMONDS, Rank.SEVEN),
+            Card(Suit.SPADES, Rank.TWO),
+        ])
+        self.assertEqual(ctx.hand_penalty(0), 20 + 10 + 10 + 5 + 5)
 
 
 class TestOracleTruth(unittest.TestCase):

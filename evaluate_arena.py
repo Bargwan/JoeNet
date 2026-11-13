@@ -6,7 +6,6 @@ from tqdm import tqdm
 
 from fast_engine import JoeEngine
 from game_context import GameContext
-from reward import RewardCalculator
 
 
 def _get_list_index_from_action(player, action_idx):
@@ -135,8 +134,7 @@ def _worker_simulate_single_game(config):
         if state_id == 'discard_phase':
             last_discarder_idx = active_idx
             if active_idx == 0:
-                calc = RewardCalculator(ctx)
-                agent_0_deadwood = calc._calculate_active_deadwood(0)
+                agent_0_deadwood = ctx.hand_penalty(0)
                 agent_0_projected_score_at_discard = ctx.players[0].score + agent_0_deadwood
 
         prev_round_idx = ctx.current_round_idx
@@ -222,19 +220,6 @@ class TournamentRunner:
 
         start_time = time.time()
 
-        # --- PYTORCH IPC SAFETY BLOCK ---
-        original_devices = []
-        for agent in self.config.agents:
-            if hasattr(agent, 'model'):
-                try:
-                    original_devices.append(next(agent.model.parameters()).device)
-                    agent.model.to('cpu')
-                    agent.model.eval()
-                except Exception:
-                    original_devices.append(None)
-            else:
-                original_devices.append(None)
-
         num_workers = max(1, multiprocessing.cpu_count() - 1)
 
         # --- NEW: Create exactly 1 task per game for dynamic load balancing ---
@@ -251,11 +236,6 @@ class TournamentRunner:
                 unit="game",
                 ncols=80
             ))
-
-        # --- RESTORE PYTORCH DEVICES ---
-        for agent, device in zip(self.config.agents, original_devices):
-            if hasattr(agent, 'model') and device is not None:
-                agent.model.to(device)
 
         return self._aggregate_and_print(results, start_time)
 

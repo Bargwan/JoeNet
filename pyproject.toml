@@ -1,17 +1,11 @@
 [project]
 name = "joenet"
 version = "0.1.0"
-description = "This project implements the AI for the multiplayer imperfect-information Rummy-variant 'Joe' using a state-of-the-art Deep Reinforcement Learning (Actor-Critic) architecture, augmented by an Oracle (Belief State) network ."
+description = "AI agents for the multiplayer imperfect-information Rummy variant 'Joe', building towards a BayesianAgent that tracks beliefs about hidden cards."
 requires-python = ">=3.13"
 dependencies = [
-    "torch",
-    "h5py>=3.15.1",
     "numpy>=2.4.2",
-    "onnxruntime>=1.24.4",
-    "onnx>=1.20.1",
     "python-statemachine>=3.0.0",
-    "tensorboard>=2.20.0",
-    "setuptools<82",
     "tqdm>=4.67.3",
 ]
 
@@ -40,14 +34,6 @@ ignore = []
 quote-style = "double"
 indent-style = "space"
 
-
-[[tool.uv.index]]
-name = "pytorch-gpu"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-gpu" }]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
