@@ -845,9 +845,9 @@ class TestJoeEngine(unittest.TestCase):
         """
         from cards import Card, Rank, Suit
 
-        # 1. Setup: Active player is Player 1.
-        # By definition, this means Player 0 was the discarder.
+        # 1. Setup: Active player is Player 1, and Player 0 discarded the top card.
         self.ctx.active_player_idx = 1
+        self.ctx.top_discarder_idx = 0
 
         # Give the deck a card so the stock draw works
         self.ctx.deck.append(Card(Suit.SPADES, Rank.ACE, deck_index=0))

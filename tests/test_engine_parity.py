@@ -49,10 +49,9 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 engine.enter_pickup()
                 self.assertEqual(self.get_state_id(engine), 'pickup_decision')
 
-                # At this point, the game is paused waiting for Neural Network input.
-                # Because the dealer was 0, Player 1 should be the active player.
-                self.assertEqual(ctx.active_player_idx, 1,
-                                 "Player 1 should be active after the first rotation")
+                # The player clockwise of the (random) dealer takes the first turn.
+                self.assertEqual(ctx.active_player_idx, (ctx.dealer_idx + 1) % 4,
+                                 "The player after the dealer should be active first")
 
     def test_may_i_target_trap(self):
         """
@@ -70,11 +69,11 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 engine.enter_pickup()
 
                 active_player = ctx.active_player_idx
-                self.assertEqual(active_player, 1)
+                target = (active_player + 1) % 4
 
-                # Ensure discard pile exists and Player 2 hand size is standard 11
+                # Ensure discard pile exists and the target's hand size is standard 11
                 self.assertEqual(len(ctx.discard_pile), 1)
-                self.assertEqual(len(ctx.players[2].hand_list), 11)
+                self.assertEqual(len(ctx.players[target].hand_list), 11)
 
                 # ACT: Active Player (1) picks from the STOCK (Action 0)
                 # This leaves the top discard available, triggering the May-I queue
@@ -83,8 +82,8 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 # ASSERT: Engine halts at May-I Decision
                 self.assertEqual(self.get_state_id(engine), 'may_i_decision')
 
-                # BUG #1 CHECK: Target is Player 2 (Downstream of Player 1)
-                self.assertEqual(ctx.may_i_target_idx, 2,
+                # BUG #1 CHECK: Target is the player downstream of the active player
+                self.assertEqual(ctx.may_i_target_idx, target,
                                  "Target must be downstream of active player")
                 self.assertNotEqual(ctx.may_i_target_idx, ctx.active_player_idx,
                                     "Target CANNOT be the active player")
@@ -95,10 +94,10 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 # ASSERT: Data movement
                 self.assertEqual(len(ctx.discard_pile), 0,
                                  "Discard pile should be empty after May-I")
-                self.assertEqual(len(ctx.players[2].hand_list), 13,
-                                 "Player 2 should have received 1 discard + 1 penalty stock card")
-                self.assertEqual(ctx.players[2].may_is_used, 1,
-                                 "Player 2 May-I counter should increment")
+                self.assertEqual(len(ctx.players[target].hand_list), 13,
+                                 "Target should have received 1 discard + 1 penalty stock card")
+                self.assertEqual(ctx.players[target].may_is_used, 1,
+                                 "Target May-I counter should increment")
 
                 # ASSERT: Engine resumes for Active Player (1)
                 # The engine will auto-route through `processing_pickup` -> `evaluate_hand()`
@@ -106,7 +105,7 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 current_state = self.get_state_id(engine)
                 self.assertIn(current_state,
                               ['discard_phase', 'go_down_decision', 'table_play_phase'])
-                self.assertEqual(ctx.active_player_idx, 1,
+                self.assertEqual(ctx.active_player_idx, active_player,
                                  "Control must return to the active player after May-I completes!")
 
 

@@ -168,7 +168,9 @@ class JoeEngine:
     # ========================================================================
 
     def on_enter_dealing(self):
-        if self.ctx.current_round_idx > 0:
+        if self.ctx.current_round_idx == 0:
+            self.ctx.choose_first_dealer()
+        else:
             self.ctx.rotate_dealer()
         self.ctx.execute_deal()
 

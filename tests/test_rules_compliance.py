@@ -399,7 +399,6 @@ def test_player_after_dealer_takes_first_turn(engine_cls):
 
 
 @pytest.mark.parametrize("engine_cls", ENGINES)
-@xfail("Review item 5: the first dealer is always seat 0")
 def test_first_dealer_is_random(engine_cls):
     first_dealers = set()
     for seed in range(40):
@@ -433,15 +432,15 @@ def may_i_offers(ctx, engine):
     return offered
 
 
+@pytest.mark.parametrize("num_players", [3, 4])
 @pytest.mark.parametrize("engine_cls", ENGINES)
-@xfail("Review item 4: the dealer is never offered the opening upcard")
-def test_opening_upcard_is_offered_to_everyone_but_the_active_player(engine_cls):
-    ctx, engine = start_first_turn(engine_cls)
+def test_opening_upcard_is_offered_to_everyone_but_the_active_player(engine_cls, num_players):
+    ctx, engine = start_first_turn(engine_cls, num_players)
     active = ctx.active_player_idx
 
     engine.resolve_pickup(0)  # PICK_STOCK
 
-    expected = [(active + i) % 4 for i in (1, 2, 3)]
+    expected = [(active + i) % num_players for i in range(1, num_players)]
     assert may_i_offers(ctx, engine) == expected
 
 

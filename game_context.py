@@ -101,6 +101,8 @@ class GameContext:
         self.current_round_idx = 0
         self.total_actions = 0
         self.may_i_target_idx = None
+        # Who discarded the top card of the discard pile; None for the opening upcard.
+        self.top_discarder_idx = None
 
     # --- Turn Management ---
 
@@ -150,13 +152,19 @@ class GameContext:
                 card = self.deck.pop(0)
                 player.receive_cards([card])
 
-        # 3. Flip top card to discard
+        # 3. Flip top card to discard (the opening upcard: nobody discarded it)
         if self.deck:
             initial_discard = self.deck.pop(0)
             self.discard_pile.append(initial_discard)
+        self.top_discarder_idx = None
 
     def rotate_player(self):
         self.active_player_idx = (self.active_player_idx + 1) % self.num_players
+
+    def choose_first_dealer(self):
+        """The first dealer of a game is chosen at random (rules.md Section 2)."""
+        self.dealer_idx = random.randrange(self.num_players)
+        self.active_player_idx = self.dealer_idx
 
     def rotate_dealer(self):
         self.dealer_idx = (self.dealer_idx + 1) % self.num_players
@@ -512,6 +520,7 @@ class GameContext:
 
         # 3. Place new card on top of the list (Representing Channel 3)
         self.discard_pile.append(card_to_discard)
+        self.top_discarder_idx = player_idx
         self._record_action(
             self.player_discard_counts,
             player_idx,
@@ -532,26 +541,27 @@ class GameContext:
         self._place_on_table(suit, rank, destination)
 
     def start_may_i_checks(self):
-        """Initializes the May-I loop to the first downstream player."""
+        """Starts the May-I offer with the player immediately clockwise of the active player."""
         self.may_i_target_idx = (self.active_player_idx + 1) % self.num_players
 
     def advance_may_i_target(self):
-        """Moves the target pointer to the next downstream player."""
+        """Moves the offer to the next player clockwise."""
         self.may_i_target_idx = (self.may_i_target_idx + 1) % self.num_players
 
     def is_may_i_target_eligible(self):
-        """Checks if the currently targeted player can legally call a May-I."""
+        """Checks if the currently targeted player can legally call a May-I (rules.md Section 5)."""
         if self.may_i_target_idx is None:
             return False
 
-        target_player = self.players[self.may_i_target_idx]
+        # The player who discarded the targeted card cannot May-I it back.
+        # Nobody discarded the opening upcard, so this excludes no-one then.
+        if self.may_i_target_idx == self.top_discarder_idx:
+            return False
 
-        # Rule 1: Cannot May-I if already down
+        target_player = self.players[self.may_i_target_idx]
         if target_player.is_down:
             return False
 
-        # --- Rule 2: Cannot May-I if out of tokens ---
-        # Checks your config if the variable exists, otherwise strictly enforces 3
         limit = getattr(self.config, 'max_may_is', 3)
         if target_player.may_is_used >= limit:
             return False
@@ -559,12 +569,8 @@ class GameContext:
         return True
 
     def all_may_i_targets_checked(self):
-        """
-        Returns True if the loop has reached the player who discarded the card.
-        The discarder is always the player immediately preceding the active player.
-        """
-        discarder_idx = (self.active_player_idx - 1) % self.num_players
-        return self.may_i_target_idx == discarder_idx
+        """True once the offer has gone all the way round back to the active player."""
+        return self.may_i_target_idx == self.active_player_idx
 
     def clone(self):
         """
@@ -595,6 +601,7 @@ class GameContext:
         new_ctx.dealer_idx = self.dealer_idx
         new_ctx.current_round_idx = self.current_round_idx
         new_ctx.total_actions = self.total_actions
+        new_ctx.top_discarder_idx = self.top_discarder_idx
 
         if hasattr(self, 'may_i_target_idx'):
             new_ctx.may_i_target_idx = self.may_i_target_idx
