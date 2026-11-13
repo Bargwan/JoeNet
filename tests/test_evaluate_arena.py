@@ -49,44 +49,44 @@ class TestEvaluationArena(unittest.TestCase):
         self.assertIsInstance(results["tournament_win_rate"], float)
         self.assertIsInstance(results["strategic_detonations"], float)
 
-    def test_apply_engine_action_dispatch(self):
+    def test_apply_engine_action_converts_numbers_to_actions(self):
         """
-        Verify that apply_engine_action routes action numbers to the right engine
-        methods and turns card actions into hand-list indices.
+        Verify the temporary adapter turns an agent's action number into the
+        matching action object and plays it with engine.apply().
         """
+        from actions import Discard, GoDown, PickStock
+
         ctx = GameContext(num_players=4)
         mock_engine = MagicMock()
+        player = ctx.players[0]
+        player.hand_list.clear()
+        player.private_hand.fill(0)
+        # Two sets (7s and 9s) for the [3, 3] objective, plus a 10 of Hearts
+        player.receive_cards([Card(s, r) for r in (Rank.SEVEN, Rank.NINE)
+                              for s in (Suit.SPADES, Suit.CLUBS, Suit.DIAMONDS)]
+                             + [Card(Suit.HEARTS, Rank.TEN)])
 
-        # Setup: Give Player 0 a 10 of Hearts
-        # Discard action = 6 + (Suit * 13) + Rank = 6 + 13 + 9 = 28
-        target_card = Card(Suit.HEARTS, Rank.TEN)
-        ctx.players[0].receive_cards([target_card])
+        # Control action 0 -> PickStock
+        apply_engine_action(mock_engine, ctx, 'pickup_decision', 0, 0)
+        mock_engine.apply.assert_called_with(PickStock())
 
-        # Test A: Control action (0 -> resolve_pickup(0))
-        apply_engine_action(mock_engine, ctx, state_id='pickup_decision', player_idx=0,
-                            action_idx=0)
-        mock_engine.resolve_pickup.assert_called_with(0)
+        # GO_DOWN with no agent -> the first way to go down
+        apply_engine_action(mock_engine, ctx, 'go_down_decision', 0, 4)
+        mock_engine.apply.assert_called_with(GoDown((('set', Rank.SEVEN), ('set', Rank.NINE))))
 
-        # Test B: Go down with no agent -> engine picks the melds (None)
-        apply_engine_action(mock_engine, ctx, state_id='go_down_decision', player_idx=0,
-                            action_idx=4)
-        mock_engine.resolve_go_down.assert_called_with(4, None)
-
-        # Test B2: Go down with an agent -> the agent's meld choice is passed on
+        # GO_DOWN with an agent -> the agent's meld choice
         chooser = MagicMock()
-        chooser.choose_go_down_melds.return_value = [('set', 9), ('set', 7)]
-        apply_engine_action(mock_engine, ctx, state_id='go_down_decision', player_idx=0,
-                            action_idx=4, agent=chooser)
-        mock_engine.resolve_go_down.assert_called_with(4, [('set', 9), ('set', 7)])
+        chooser.choose_go_down_melds.return_value = [('set', Rank.NINE), ('set', Rank.SEVEN)]
+        apply_engine_action(mock_engine, ctx, 'go_down_decision', 0, 4, agent=chooser)
+        mock_engine.apply.assert_called_with(GoDown((('set', Rank.NINE), ('set', Rank.SEVEN))))
 
-        # Test C: Discard action 28 -> perform_discard(0), the card's index in the hand
-        apply_engine_action(mock_engine, ctx, state_id='discard_phase', player_idx=0, action_idx=28)
-        mock_engine.perform_discard.assert_called_with(0)
+        # Discard action 28 = 6 + (Suit * 13) + Rank = 6 + 13 + 9 -> Discard 10 of Hearts
+        apply_engine_action(mock_engine, ctx, 'discard_phase', 0, 28)
+        mock_engine.apply.assert_called_with(Discard(Suit.HEARTS, Rank.TEN))
 
-        # Test D: Discarding a card the player doesn't hold (action 50) raises
+        # Discarding a card the player doesn't hold (action 50) raises
         with self.assertRaises(ValueError):
-            apply_engine_action(mock_engine, ctx, state_id='discard_phase', player_idx=0,
-                                action_idx=50)
+            apply_engine_action(mock_engine, ctx, 'discard_phase', 0, 50)
 
     @patch('evaluate_arena.apply_engine_action')
     def test_transient_state_round_win_tracking(self, mock_apply):

@@ -7,15 +7,16 @@ import logging
 
 from statemachine import State, StateMachine
 
+from engine_driver import EngineDriver
+
 logger = logging.getLogger(__name__)
 
 
-class JoeEngine(StateMachine):
+class JoeEngine(EngineDriver, StateMachine):
     """
     State machine for one game of Joe, organised in the order a turn happens.
-    The rules themselves are applied by the GameContext passed in. The caller
-    drives it: start_game(), then deal_cards() when 'dealing', enter_pickup()
-    at 'start_turn', and the agent's action at each waiting state.
+    The rules themselves are applied by the GameContext passed in. Drive it with
+    advance(), decider() and apply(action) from EngineDriver.
     """
 
     def __init__(self, context):

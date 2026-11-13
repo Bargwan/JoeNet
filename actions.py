@@ -64,10 +64,14 @@ class Pass:
 @dataclass(frozen=True)
 class GoDown:
     """
-    Go down with these melds (GameContext's meld format, as a tuple):
-    ('run', suit, start) and ('set', rank).
+    Go down with these melds (GameContext's meld format): ('run', suit, start)
+    and ('set', rank). The order doesn't matter: melds are stored sorted, so two
+    GoDowns with the same melds are equal.
     """
     melds: tuple
+
+    def __post_init__(self):
+        object.__setattr__(self, 'melds', tuple(sorted(tuple(m) for m in self.melds)))
 
     def __str__(self):
         parts = []

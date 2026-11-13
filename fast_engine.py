@@ -4,6 +4,8 @@ python-statemachine version) state for state; the parity tests keep them in step
 """
 import logging
 
+from engine_driver import EngineDriver
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,10 +27,11 @@ class FastState:
     def __repr__(self):
         return f"State({self.id})"
 
-class JoeEngine:
+class JoeEngine(EngineDriver):
     """
-    Hand-written state machine for one game of Joe, with the same states,
-    transitions and driving calls as engine.JoeEngine.
+    Hand-written state machine for one game of Joe, with the same states and
+    transitions as engine.JoeEngine. Drive it with advance(), decider() and
+    apply(action) from EngineDriver.
     """
     __slots__ = ['ctx', 'current_state']
 

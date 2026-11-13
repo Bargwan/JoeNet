@@ -8,16 +8,30 @@ from dataclasses import dataclass
 
 from tqdm import tqdm
 
+from actions import (
+    CallMayI,
+    Discard,
+    EndTablePlay,
+    GoDown,
+    Pass,
+    PickDiscard,
+    PickStock,
+    Place,
+    Wait,
+)
 from fast_engine import JoeEngine
-from game_context import END_TABLE_PLAY, GO_DOWN, GameContext, decode_card_action
-
-
-def _find_card_in_hand(player, suit, rank):
-    """Index in the player's hand list of a card with this suit and rank."""
-    for i, card in enumerate(player.hand_list):
-        if int(card.suit) == suit and int(card.rank) == rank:
-            return i
-    raise ValueError(f"Card {suit}-{rank} not found in player's hand!")
+from game_context import (
+    CALL_MAY_I,
+    END_TABLE_PLAY,
+    GO_DOWN,
+    PASS,
+    PICK_DISCARD,
+    PICK_STOCK,
+    WAIT,
+    GameContext,
+    discard_action,
+    place_action,
+)
 
 
 def _log_round_cap_hands(ctx):
@@ -46,28 +60,36 @@ def _log_round_cap_hands(ctx):
 def apply_engine_action(engine: JoeEngine, ctx: GameContext, state_id: str, player_idx: int,
                         action_idx: int, agent=None):
     """
-    Applies an agent's chosen action number to the engine. When the action is
-    GO_DOWN, the agent (if given) is asked which melds to lay.
+    Temporary adapter while agents still return action numbers: converts the
+    number to the matching action object and plays it with engine.apply().
+    For GO_DOWN, the agent (if given) chooses the melds.
     """
-    if state_id == 'pickup_decision':
-        engine.resolve_pickup(action_idx)
-    elif state_id == 'may_i_decision':
-        engine.resolve_may_i(action_idx)
-    elif state_id == 'go_down_decision':
-        melds = None
-        if action_idx == GO_DOWN and agent is not None:
-            melds = agent.choose_go_down_melds(ctx, player_idx)
-        engine.resolve_go_down(action_idx, melds)
-    elif state_id == 'table_play_phase':
-        if action_idx == END_TABLE_PLAY:
-            engine.end_table_play()
-        else:
-            suit, rank, destination = decode_card_action(action_idx)
-            engine.perform_table_play(_find_card_in_hand(ctx.players[player_idx], suit, rank),
-                                      destination)
-    elif state_id == 'discard_phase':
-        suit, rank, _ = decode_card_action(action_idx)
-        engine.perform_discard(_find_card_in_hand(ctx.players[player_idx], suit, rank))
+    engine.apply(_action_from_number(ctx, state_id, player_idx, action_idx, agent))
+
+
+def _action_from_number(ctx, state_id, player_idx, number, agent):
+    legal = ctx.legal_actions(player_idx, state_id)
+    if state_id == 'go_down_decision' and number == GO_DOWN:
+        melds = agent.choose_go_down_melds(ctx, player_idx) if agent is not None else None
+        if melds is None:
+            return next(a for a in legal if isinstance(a, GoDown))
+        return GoDown(tuple(tuple(m) for m in melds))
+    for action in legal:
+        if _action_number(action, state_id) == number:
+            return action
+    raise ValueError(f"Action number {number} is not legal in {state_id}.")
+
+
+def _action_number(action, state_id):
+    """The old action number for an action object (temporary, see apply_engine_action)."""
+    if isinstance(action, Place):
+        return place_action(action.suit, action.rank, action.destination)
+    if isinstance(action, Discard):
+        return discard_action(action.suit, action.rank)
+    if isinstance(action, (Wait, EndTablePlay)):
+        return WAIT if state_id == 'go_down_decision' else END_TABLE_PLAY
+    return {PickStock: PICK_STOCK, PickDiscard: PICK_DISCARD, CallMayI: CALL_MAY_I,
+            Pass: PASS, GoDown: GO_DOWN}[type(action)]
 
 
 # =========================================================================
@@ -102,30 +124,18 @@ def _worker_simulate_single_game(config):
 
     ctx = GameContext(num_players=num_players)
     engine = JoeEngine(ctx)
-    engine.start_game()
+    engine.advance()
 
     agent_0_went_down_this_turn = False
     last_discarder_idx = -1
     agent_0_projected_score_at_discard = 0.0
 
-    while True:
-        raw_state_id = engine.current_state.id
-        state_id = raw_state_id.lower().replace(' ', '_').replace('-', '_')
+    # The engine scores each round itself; the loop ends when the game is over.
+    while (decision := engine.decider()) is not None:
+        state_id, active_idx = decision
+        if state_id == 'pickup_decision' and active_idx == 0:
+            agent_0_went_down_this_turn = False  # agent 0's turn is starting
 
-        if state_id == 'game_over':
-            break  # the engine has already scored the final round
-
-        if state_id == 'dealing':
-            engine.deal_cards()
-            continue
-
-        if state_id == 'start_turn':
-            if ctx.active_player_idx == 0:
-                agent_0_went_down_this_turn = False
-            engine.enter_pickup()
-            continue
-
-        active_idx = ctx.may_i_target_idx if state_id == 'may_i_decision' else ctx.active_player_idx
         agent = config.agents[active_idx]
 
         mask = ctx.get_action_mask(active_idx, state_id)
