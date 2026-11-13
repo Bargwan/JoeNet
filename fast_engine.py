@@ -1,10 +1,14 @@
+"""
+The Joe turn flow written by hand for speed. It mirrors engine.py (the
+python-statemachine version) state for state; the parity tests keep them in step.
+"""
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 class FastState:
-    """Lightweight state representation to mimic statemachine properties."""
+    """A state, compared by its name, like python-statemachine's State."""
     __slots__ = ['id']
 
     def __init__(self, state_id):
@@ -23,11 +27,12 @@ class FastState:
 
 class JoeEngine:
     """
-    A lightning-fast, hardcoded state machine replacement for the 'Joe' card game.
+    Hand-written state machine for one game of Joe, with the same states,
+    transitions and driving calls as engine.JoeEngine.
     """
     __slots__ = ['ctx', 'current_state']
 
-    # Refactored to match original engine.py Title Case strings
+    # State names match engine.py
     setup = FastState('Setup')
     dealing = FastState('Dealing')
     start_turn = FastState('Start Turn')
@@ -185,11 +190,8 @@ class JoeEngine:
     def on_enter_start_turn(self):
         self.ctx.rotate_player()
         self.ctx.advance_action_counter()
-
-        # NOTE: You may want to comment this debug line out during Phase 1 Data Generation
-        # to save string-formatting micro-seconds across the millions of turns.
         logger.debug(
-            f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Action {self.ctx.total_actions}) ---")
+            f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Turn {self.ctx.total_actions}) ---")
 
     def before_resolve_pickup(self, action: int):
         if action == 1:  # PICK_DISCARD

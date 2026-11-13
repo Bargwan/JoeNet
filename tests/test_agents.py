@@ -1,9 +1,9 @@
 import unittest
+
 import numpy as np
 
-# We will build these in agents.py next
-from agents import RandomAgent, HeuristicAgent
-from game_context import GameContext
+from agents import HeuristicAgent, RandomAgent
+from game_context import NUM_ACTIONS, GameContext
 from config import JoeConfig
 from cards import Card, Suit, Rank
 
@@ -29,7 +29,7 @@ class TestBaselineAgents(unittest.TestCase):
         agent = RandomAgent()
 
         # Create a mock mask where only GO_DOWN (4) and WAIT (5) are valid
-        mask = np.zeros(58, dtype=bool)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
         mask[4] = True
         mask[5] = True
 
@@ -64,7 +64,7 @@ class TestBaselineAgents(unittest.TestCase):
         idx_9s = agent._get_discard_action_idx(card_9s)
         idx_10s = agent._get_discard_action_idx(card_10s)
 
-        mask = np.zeros(58, dtype=bool)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
         mask[idx_7h] = True
         mask[idx_9s] = True
         mask[idx_10s] = True
@@ -93,7 +93,7 @@ class TestBaselineAgents(unittest.TestCase):
         ctx = GameContext(num_players=4, config=self.config)
         p0 = ctx.players[0]
 
-        mask = np.zeros(58, dtype=bool)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
         mask[2] = True
         mask[3] = True
 
@@ -120,7 +120,7 @@ class TestBaselineAgents(unittest.TestCase):
         self.assertEqual(action, 2, "In a [3,3] round, agent should CALL on a set-completing card.")
 
     # =========================================================================
-    # NEW STEP 5.1 TESTS: Dynamic Panic Probability
+    # Go-down probability (_calculate_go_down_probability)
     # =========================================================================
 
     def test_dynamic_panic_early_game_baseline(self):
@@ -148,8 +148,7 @@ class TestBaselineAgents(unittest.TestCase):
         agent = HeuristicAgent()
         ctx = GameContext(num_players=4)
 
-        # --- THE FIX ---
-        # 1. Set to Round 3 (Index 2) -> Patience Threshold is now 10.0 turns (8.0 + 2)
+        # 1. Round 3 (index 2) -> patience threshold is 10.0 circuits (8.0 + 2)
         ctx.current_round_idx = 2
 
         # 2. Set to 32 actions -> Circuit 8.
@@ -179,105 +178,106 @@ class TestBaselineAgents(unittest.TestCase):
         self.assertAlmostEqual(prob, 0.8, places=2,
                                msg="Opponent threat should dynamically scale probability!")
 
-        # =========================================================================
-        # NEW STEP 5.1 TESTS: Partial Meld Acceptance Logic
-        # =========================================================================
+    # =========================================================================
+    # Pickup and May-I with partial melds
+    # =========================================================================
 
-        def test_heuristic_agent_pickup_accepts_partials(self):
-            """
-            Verify Standard Pickup accepts a card that extends a partial meld,
-            even if it does not complete the objective.
-            """
-            agent = HeuristicAgent()
-            ctx = GameContext(num_players=4, config=self.config)
-            p0 = ctx.players[0]
+    def test_heuristic_agent_pickup_accepts_partials(self):
+        """
+        Verify Standard Pickup accepts a card that extends a partial meld,
+        even if it does not complete the objective.
+        """
+        agent = HeuristicAgent()
+        ctx = GameContext(num_players=4, config=self.config)
+        p0 = ctx.players[0]
 
-            # Scenario: Round 2 ([4,4] - Runs Only)
-            ctx.current_round_idx = 2
+        # Scenario: Round 2 ([4,4] - Runs Only)
+        ctx.current_round_idx = 2
 
-            # Hand: 5 and 6 of Spades (Partial run of 2)
-            p0.hand_list.clear()
-            p0.private_hand.fill(0)
-            p0.receive_cards([Card(Suit.SPADES, Rank.FIVE), Card(Suit.SPADES, Rank.SIX)])
+        # Hand: 5 and 6 of Spades (Partial run of 2)
+        p0.hand_list.clear()
+        p0.private_hand.fill(0)
+        p0.receive_cards([Card(Suit.SPADES, Rank.FIVE), Card(Suit.SPADES, Rank.SIX)])
 
-            # Discard: 7 of Spades (Extends partial to 3, but does NOT complete a 4-card run)
-            ctx.discard_pile = [Card(Suit.SPADES, Rank.SEVEN)]
+        # Discard: 7 of Spades (Extends partial to 3, but does NOT complete a 4-card run)
+        ctx.discard_pile = [Card(Suit.SPADES, Rank.SEVEN)]
 
-            # Action Mask: 0 (Draw Stock), 1 (Pickup Discard)
-            mask = np.zeros(58, dtype=bool)
-            mask[0] = True
-            mask[1] = True
+        # Action Mask: 0 (Draw Stock), 1 (Pickup Discard)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        mask[0] = True
+        mask[1] = True
 
-            action = agent.select_action('pickup_decision', ctx, player_idx=0, action_mask=mask)
-            self.assertEqual(
-                action,
-                1,
-                "Agent should pick up the 7 of Spades on its turn to build a partial 3-card run."
-            )
+        action = agent.select_action('pickup_decision', ctx, player_idx=0, action_mask=mask)
+        self.assertEqual(
+            action,
+            1,
+            "Agent should pick up the 7 of Spades on its turn to build a partial 3-card run."
+        )
 
-        def test_heuristic_agent_may_i_refuses_partials(self):
-            """
-            Verify May-I strictly refuses a card that only extends a partial meld,
-            adhering to the rule that May-I is only for final completion.
-            """
-            agent = HeuristicAgent()
-            ctx = GameContext(num_players=4, config=self.config)
-            p0 = ctx.players[0]
+    def test_heuristic_agent_may_i_refuses_partials(self):
+        """
+        Verify that before Round 4 the agent refuses a May-I for a card that only
+        extends a partial meld without completing it.
+        """
+        agent = HeuristicAgent()
+        ctx = GameContext(num_players=4, config=self.config)
+        p0 = ctx.players[0]
 
-            # Scenario: Round 2 ([4,4] - Runs Only)
-            ctx.current_round_idx = 2
+        # Scenario: Round 2 ([4,4] - Runs Only)
+        ctx.current_round_idx = 2
 
-            # Hand: 5 and 6 of Spades (Partial run of 2)
-            p0.hand_list.clear()
-            p0.private_hand.fill(0)
-            p0.receive_cards([Card(Suit.SPADES, Rank.FIVE), Card(Suit.SPADES, Rank.SIX)])
+        # Hand: 5 and 6 of Spades (Partial run of 2)
+        p0.hand_list.clear()
+        p0.private_hand.fill(0)
+        p0.receive_cards([Card(Suit.SPADES, Rank.FIVE), Card(Suit.SPADES, Rank.SIX)])
 
-            # Discard: 7 of Spades (Extends partial to 3, but does NOT complete a 4-card run)
-            ctx.discard_pile = [Card(Suit.SPADES, Rank.SEVEN)]
+        # Discard: 7 of Spades (Extends partial to 3, but does NOT complete a 4-card run)
+        ctx.discard_pile = [Card(Suit.SPADES, Rank.SEVEN)]
 
-            # Action Mask: 2 (May-I Call), 3 (May-I Pass)
-            mask = np.zeros(58, dtype=bool)
-            mask[2] = True
-            mask[3] = True
+        # Action Mask: 2 (May-I Call), 3 (May-I Pass)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        mask[2] = True
+        mask[3] = True
 
-            action = agent.select_action('may_i_decision', ctx, player_idx=0, action_mask=mask)
-            self.assertEqual(
-                action,
-                3,
-                "Agent should PASS on the May-I because 5-6-7 does not complete the 4-card objective."
-            )
+        action = agent.select_action('may_i_decision', ctx, player_idx=0, action_mask=mask)
+        self.assertEqual(
+            action,
+            3,
+            "Agent should PASS on the May-I because 5-6-7 does not complete the 4-card objective."
+        )
 
-        def test_heuristic_agent_pickup_accepts_one_gap(self):
-            """
-            Verify Option B logic: Agent accepts a card that creates a 1-gap
-            (inside straight) because it is within a rank distance of 2.
-            """
-            agent = HeuristicAgent()
-            ctx = GameContext(num_players=4, config=self.config)
-            p0 = ctx.players[0]
+    def test_heuristic_agent_pickup_accepts_one_gap(self):
+        """
+        Verify the agent picks up a card that leaves a one-card gap in a run
+        (an inside straight), since it is within 2 ranks of a held card.
+        """
+        agent = HeuristicAgent()
+        ctx = GameContext(num_players=4, config=self.config)
+        p0 = ctx.players[0]
 
-            # Scenario: Round 2 ([4,4] - Runs Only)
-            ctx.current_round_idx = 2
+        # Scenario: Round 2 ([4,4] - Runs Only)
+        ctx.current_round_idx = 2
 
-            # Hand: 5 and 6 of Spades (Partial run of 2)
-            p0.hand_list.clear()
-            p0.private_hand.fill(0)
-            p0.receive_cards([Card(Suit.SPADES, Rank.FIVE), Card(Suit.SPADES, Rank.SIX)])
+        # Hand: 5 and 6 of Spades (Partial run of 2)
+        p0.hand_list.clear()
+        p0.private_hand.fill(0)
+        p0.receive_cards([Card(Suit.SPADES, Rank.FIVE), Card(Suit.SPADES, Rank.SIX)])
 
-            # Discard: 8 of Spades (Creates a 1-gap: 5-6-[-]-8)
-            ctx.discard_pile = [Card(Suit.SPADES, Rank.EIGHT)]
+        # Discard: 8 of Spades (Creates a 1-gap: 5-6-[-]-8)
+        ctx.discard_pile = [Card(Suit.SPADES, Rank.EIGHT)]
 
-            # Action Mask: 0 (Draw Stock), 1 (Pickup Discard)
-            mask = np.zeros(58, dtype=bool)
-            mask[0] = True
-            mask[1] = True
+        # Action Mask: 0 (Draw Stock), 1 (Pickup Discard)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
+        mask[0] = True
+        mask[1] = True
 
-            action = agent.select_action('pickup_decision', ctx, player_idx=0, action_mask=mask)
-            self.assertEqual(
-                action,
-                1,
-                "Agent should pick up the 8 of Spades on its turn to build a 1-gapped run."
-            )
+        action = agent.select_action('pickup_decision', ctx, player_idx=0, action_mask=mask)
+        self.assertEqual(
+            action,
+            1,
+            "Agent should pick up the 8 of Spades on its turn to build a 1-gapped run."
+        )
+
 
 class TestHeuristicTablePlay(unittest.TestCase):
     """HeuristicAgent places Key Cards on runs when it can, otherwise on sets."""

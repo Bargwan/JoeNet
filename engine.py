@@ -1,4 +1,10 @@
+"""
+The Joe turn flow as a python-statemachine state machine: the readable reference
+version. fast_engine.py implements the same flow by hand for speed; the parity
+tests keep them in step. Run this module to draw the state diagram.
+"""
 import logging
+
 from statemachine import State, StateMachine
 
 logger = logging.getLogger(__name__)
@@ -6,8 +12,10 @@ logger = logging.getLogger(__name__)
 
 class JoeEngine(StateMachine):
     """
-    State machine for the 'Joe' card game.
-    Organized chronologically by Game Phase.
+    State machine for one game of Joe, organised in the order a turn happens.
+    The rules themselves are applied by the GameContext passed in. The caller
+    drives it: start_game(), then deal_cards() when 'dealing', enter_pickup()
+    at 'start_turn', and the agent's action at each waiting state.
     """
 
     def __init__(self, context):
@@ -122,7 +130,7 @@ class JoeEngine(StateMachine):
             | round_end.to(dealing)
     )
 
-# ========================================================================
+    # ========================================================================
     # 3. GUARDS (Conditionals)
     # ========================================================================
 
@@ -195,7 +203,7 @@ class JoeEngine(StateMachine):
         self.ctx.rotate_player()
         self.ctx.advance_action_counter()
         logger.debug(
-            f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Action {self.ctx.total_actions}) ---")
+            f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Turn {self.ctx.total_actions}) ---")
 
     def before_resolve_pickup(self, action: int):
         if action == 1:  # PICK_DISCARD
@@ -244,6 +252,7 @@ class JoeEngine(StateMachine):
 
 
 def generate_diagram():
+    """Saves the state diagram as joe_engine_flow.png (needs Graphviz)."""
     from statemachine.contrib.diagram import DotGraphMachine
     graph = DotGraphMachine(JoeEngine)
     dot = graph()

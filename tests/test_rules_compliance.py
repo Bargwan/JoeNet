@@ -2,13 +2,14 @@
 Rules-compliance tests: each test states a rule from rules.md and checks the
 engine obeys it.
 
-The tests only use public behaviour (going down, the table-play action mask,
-engine transitions, card movement), never the internal table representation,
-so they keep working when that representation changes.
+Most tests use only public behaviour (going down, the table-play action mask,
+engine transitions, card movement) rather than the internal table
+representation, so they keep working if that representation changes. The
+stalemate tests build closed tables directly, as that is far shorter.
 
-Tests for known, not-yet-fixed deviations are marked xfail(strict=True). When
-a fix lands, its test starts passing, strict mode turns that into a failure,
-and the fix must remove the marker.
+A deviation found before it can be fixed gets its test marked
+pytest.mark.xfail(strict=True): once fixed, strict mode reports the
+unexpected pass, so the fix must also remove the marker.
 """
 import random
 
@@ -87,9 +88,6 @@ def place(ctx, card, destination, player_idx=0):
     player.receive_cards([card])
     ctx.execute_table_play(player_idx, len(player.hand_list) - 1, destination)
 
-
-def xfail(reason):
-    return pytest.mark.xfail(strict=True, reason=reason)
 
 
 # ---------------------------------------------------------------------------

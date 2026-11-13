@@ -1,3 +1,7 @@
+"""
+The evaluation arena: plays full games between agents (using fast_engine) and
+reports results from the point of view of agent 0, the agent being tested.
+"""
 import multiprocessing
 import time
 from dataclasses import dataclass
@@ -26,7 +30,7 @@ def _log_round_cap_hands(ctx):
         f.write(f"Round {ctx.current_round_idx} Objective: {req_sets} Sets, {req_runs} Runs\n\n")
 
         for p in ctx.players:
-            # --- THE FIX: Sort by Suit, then Rank, and use the Card.__str__ ---
+            # Sorted by suit, then rank
             sorted_hand = sorted(p.hand_list, key=lambda c: (int(c.suit), int(c.rank)))
             hand_str = ", ".join([str(c) for c in sorted_hand])
 
@@ -68,10 +72,21 @@ def apply_engine_action(engine: JoeEngine, ctx: GameContext, state_id: str, play
 
 # =========================================================================
 # MULTIPROCESSING WORKER
-# Must be at the top level of the module to avoid Windows Pickling errors
+# Must be at module level so multiprocessing can pickle it.
 # =========================================================================
 def _worker_simulate_single_game(config):
-    """Executes EXACTLY ONE game and returns the raw accumulated metrics."""
+    """
+    Plays one full game and returns agent 0's raw results:
+    - tournament_wins: 1 if agent 0 finished with the lowest score (ties count).
+    - round_wins: rounds agent 0 won by going out.
+    - point_differentials: agent 0's final score minus the opponents' average.
+    - down_and_out_wins: round wins where agent 0 went down and out on the same turn.
+    - strategic_detonations: rounds another player won straight after agent 0's
+      discard, without discarding themselves, where agent 0 was ahead of the
+      winner when it discarded and lost fewer points than the other losers.
+    - stalemates, round_caps: rounds ended by a stalemate or by the turn cap.
+    - round_turns, round_circuits: turns and full circuits played in each round.
+    """
     target_tournament_wins = 0
     target_round_wins = 0
     point_differentials = []
@@ -80,8 +95,8 @@ def _worker_simulate_single_game(config):
     stalemates = 0
     round_caps = 0
 
-    round_actions = []
     round_turns = []
+    round_circuits = []
 
     num_players = len(config.agents)
 
@@ -116,7 +131,7 @@ def _worker_simulate_single_game(config):
         mask = ctx.get_action_mask(active_idx, state_id)
         action_idx = agent.select_action(state_id, ctx, active_idx, mask)
 
-        if active_idx == 0 and state_id == 'go_down_decision' and action_idx == 4:
+        if active_idx == 0 and state_id == 'go_down_decision' and action_idx == GO_DOWN:
             agent_0_went_down_this_turn = True
 
         if state_id == 'discard_phase':
@@ -128,14 +143,14 @@ def _worker_simulate_single_game(config):
         prev_round_idx = ctx.current_round_idx
         scores_before = [p.score for p in ctx.players]
 
-        actions_before = ctx.total_actions
-        turns_before = ctx.current_circuit
+        turns_before = ctx.total_actions
+        circuits_before = ctx.current_circuit
 
         apply_engine_action(engine, ctx, state_id, active_idx, action_idx, agent)
 
         if ctx.current_round_idx > prev_round_idx:
-            round_actions.append(actions_before)
             round_turns.append(turns_before)
+            round_circuits.append(circuits_before)
             if ctx.last_round_result == 'stalemate':
                 stalemates += 1
                 continue
@@ -177,13 +192,18 @@ def _worker_simulate_single_game(config):
         'strategic_detonations': true_strategic_detonations,
         'stalemates': stalemates,
         'round_caps': round_caps,
-        'round_actions': round_actions,
-        'round_turns': round_turns
+        'round_turns': round_turns,
+        'round_circuits': round_circuits,
     }
 
 
 @dataclass
 class TournamentConfig:
+    """
+    An arena run: the agents in seat order (agent 0 is the one evaluated) and
+    how many games to play. Every game is a full 7 rounds; rounds_per_game is
+    only used to turn round counts into rates.
+    """
     name: str
     agents: list
     num_games: int = 100
@@ -196,21 +216,18 @@ class TournamentConfig:
 
 
 class TournamentRunner:
-    """
-    A high-performance, headless arena loop for evaluating JoeNet Phase 6 Metrics.
-    Always evaluates performance from the perspective of Agent 0.
-    """
+    """Runs a TournamentConfig's games and reports agent 0's results."""
 
     def __init__(self, config: TournamentConfig):
         self.config = config
 
     def simulate(self) -> dict:
-        """Sequential simulation (Useful for debugging single games)"""
+        """Plays one game in this process (useful for debugging)."""
         return self._aggregate_and_print(
             [_worker_simulate_single_game(self.config)], time.time())
 
     def simulate_parallel(self) -> dict:
-        """High-speed multiprocessed simulation using dynamic queue."""
+        """Plays all the games across CPU cores, one game per task."""
         print(f"\n{'=' * 50}")
         print(f"   {self.config.name.upper()} (PARALLEL)")
         print(f"{'=' * 50}")
@@ -219,12 +236,11 @@ class TournamentRunner:
 
         num_workers = max(1, multiprocessing.cpu_count() - 1)
 
-        # --- NEW: Create exactly 1 task per game for dynamic load balancing ---
+        # One task per game, so idle cores pick up the next game
         tasks = [self.config for _ in range(self.config.num_games)]
 
         print(f"Distributing {self.config.num_games} games across {num_workers} cores...")
 
-        # --- NEW: Execute parallel workers with TQDM ---
         with multiprocessing.Pool(num_workers) as pool:
             results = list(tqdm(
                 pool.imap_unordered(_worker_simulate_single_game, tasks),
@@ -237,7 +253,7 @@ class TournamentRunner:
         return self._aggregate_and_print(results, start_time)
 
     def _aggregate_and_print(self, results: list, start_time: float) -> dict:
-        """Helper to combine worker results and print the final metrics."""
+        """Combines the games' results, prints them and returns the summary metrics."""
         total_tournament_wins = sum(r['tournament_wins'] for r in results)
         total_round_wins = sum(r['round_wins'] for r in results)
         total_down_and_out = sum(r['down_and_out_wins'] for r in results)
@@ -246,18 +262,18 @@ class TournamentRunner:
         total_round_caps = sum(r['round_caps'] for r in results)
 
         all_point_diffs = []
-        all_actions = []  # NEW
         all_turns = []
+        all_circuits = []
         for r in results:
             all_point_diffs.extend(r['point_differentials'])
-            all_actions.extend(r['round_actions'])  # NEW
             all_turns.extend(r['round_turns'])
+            all_circuits.extend(r['round_circuits'])
 
         total_rounds_played = self.config.num_games * self.config.rounds_per_game
         elapsed = time.time() - start_time
 
-        avg_actions = sum(all_actions) / len(all_actions) if all_actions else 0.0
         avg_turns = sum(all_turns) / len(all_turns) if all_turns else 0.0
+        avg_circuits = sum(all_circuits) / len(all_circuits) if all_circuits else 0.0
 
         final_metrics = {
             "tournament_win_rate": (
@@ -277,8 +293,8 @@ class TournamentRunner:
         print(f"Tournament Win Rate:   {final_metrics['tournament_win_rate']:.1f}%")
         print(f"Round Win Rate:        {final_metrics['round_win_rate']:.1f}%")
         print(f"Avg Point Diff:        {final_metrics['avg_point_diff']:.1f} pts")
-        print(f"Avg Turns / Round:     {avg_actions:.1f}")
-        print(f"Avg Circuits / Round:  {avg_turns:.1f}")
+        print(f"Avg Turns / Round:     {avg_turns:.1f}")
+        print(f"Avg Circuits / Round:  {avg_circuits:.1f}")
         print(f"Down and Out Wins:     {final_metrics['down_and_out_wins']:.0f}")
         print(f"Strategic Detonations: {final_metrics['strategic_detonations']:.0f}")
         print(f"Stalemates:            {final_metrics['stalemates']:.0f}")

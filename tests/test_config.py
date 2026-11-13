@@ -6,11 +6,10 @@ from game_context import GameContext
 
 class TestConfigurationInjection(unittest.TestCase):
 
-    def test_joe_config_unscaled_values(self):
-        """Verify config initializes with unscaled terminal point values."""
+    def test_joe_config_penalty_values(self):
+        """Verify the config holds Joe's penalty point values."""
         config = JoeConfig()
 
-        # Checking the standard Rummy unscaled point values
         self.assertEqual(config.points_ace, 20)
         self.assertEqual(config.points_eight_to_king, 10)
         self.assertEqual(config.points_two_to_seven, 5)

@@ -396,11 +396,11 @@ class TestGameContext(unittest.TestCase):
 
     def test_sync_ace_underflow_protection(self):
         """
-        Verify that _sync_ace safely prevents integer underflow (e.g., 0 - 1 = 255)
-        and overflow when modifying uint8 numpy tensors.
+        Verify that _sync_ace never takes a count below 0 (which would wrap round
+        to 255 in an unsigned tensor) or above 10.
         """
         ctx = GameContext()
-        # Create a mock uint8 tensor identical to the engine's private_hand
+        # An unsigned tensor, where an unprotected 0 - 1 would become 255
         mock_tensor = np.zeros((4, 14), dtype=np.uint8)
 
         suit_idx = Suit.HEARTS.value
@@ -486,7 +486,7 @@ class TestOracleTruth(unittest.TestCase):
 
         # Assert
         self.assertEqual(truth.shape, (3, 4, 14),
-                         "Oracle truth must remain (3, 4, 14) for architecture shape consistency")
+                         "Oracle truth must be (3, 4, 14) for 3 players too")
         self.assertEqual(truth[0, Suit.SPADES.value, Rank.ACE.value], 1)
         self.assertEqual(truth[1, Suit.HEARTS.value, Rank.KING.value], 1)
 

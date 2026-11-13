@@ -1,3 +1,8 @@
+"""
+The state of a game of Joe and the rules that change it (see rules.md).
+The engines (engine.py, fast_engine.py) decide whose decision it is; this module
+holds the cards, applies each action, builds the legal-action masks and scores rounds.
+"""
 import random
 from dataclasses import dataclass
 
@@ -71,9 +76,11 @@ def _run_positions(rank: int) -> tuple:
 
 class GameContext:
     """
-    Manages data for the game.
-    Acts as the 'Source of Truth' and facilitates data movement between
-    the Deck, the Discard Pile, and the Players.
+    The single source of truth for one game: stock, discard pile, players' hands,
+    melds on the table, and whose turn it is. Every card move goes through here.
+
+    Card-count tensors are 4 suits x 14 columns: 0 = Ace (low), 1 = Two, ...,
+    12 = King, 13 = Ace (high). An Ace is counted in both column 0 and column 13.
     """
 
     def __init__(self, num_players=4, config=None):
@@ -82,16 +89,17 @@ class GameContext:
         self.deck = create_double_deck()  # Returns 104 cards
         self.discard_pile = []
 
-        # Initialize Players
-        # (Player 0, Player 1, Player 2, Player 3)
         self.players = [Player(player_id=i) for i in range(num_players)]
 
-        # Public Game State Tensors (Spatial layers 1 and 2)
+        # Cards in sets and in runs on the table (counts per card)
         self.table_sets = np.zeros((4, 14), dtype=np.int8)
         self.table_runs = np.zeros((4, 14), dtype=np.int8)
         # Each run on the table as its own record; table_runs above is their running total.
         self.runs_on_table: list[TableRun] = []
-        self.dead_cards = np.zeros((4, 14), dtype=np.int8) # Channel 12
+        # Discards that can no longer be taken: everything in the pile except an available top card
+        self.dead_cards = np.zeros((4, 14), dtype=np.int8)
+        # Per player [player, suit, column]: how many times each card was discarded / picked up
+        # this round (pickups include May-Is). Capped at 10.
         self.player_discard_counts = np.zeros((4, 4, 14), dtype=np.int8)
         self.player_pickup_counts = np.zeros((4, 4, 14), dtype=np.int8)
 
@@ -99,7 +107,7 @@ class GameContext:
         self.active_player_idx = 0
         self.dealer_idx = 0
         self.current_round_idx = 0
-        self.total_actions = 0
+        self.total_actions = 0  # turns started this round (despite the name)
         self.may_i_target_idx = None
         # Who discarded the top card of the discard pile; None for the opening upcard.
         self.top_discarder_idx = None
@@ -120,7 +128,7 @@ class GameContext:
 
     @property
     def current_circuit(self):
-        """Returns the number of full board circuits completed (strategic turns)."""
+        """Turns started this round divided by the number of players (rounded down)."""
         return self.total_actions // self.num_players
 
     def execute_deal(self):
@@ -159,7 +167,7 @@ class GameContext:
                 card = self.deck.pop(0)
                 player.receive_cards([card])
 
-        # 3. Flip top card to discard (the opening upcard: nobody discarded it)
+        # 3. Turn over the opening upcard (nobody discarded it)
         if self.deck:
             initial_discard = self.deck.pop(0)
             self.discard_pile.append(initial_discard)
@@ -168,6 +176,7 @@ class GameContext:
         self.top_discard_available = True
 
     def rotate_player(self):
+        """Passes the turn clockwise."""
         self.active_player_idx = (self.active_player_idx + 1) % self.num_players
 
     def choose_first_dealer(self):
@@ -176,12 +185,13 @@ class GameContext:
         self.active_player_idx = self.dealer_idx
 
     def rotate_dealer(self):
+        """Passes the deal clockwise for a new round."""
         self.dealer_idx = (self.dealer_idx + 1) % self.num_players
-        # Active player usually starts to the left of dealer
+        # The first turn's rotate_player() then hands play to the player after the dealer.
         self.active_player_idx = self.dealer_idx
 
     def advance_action_counter(self):
-        """Increments the global action counter for absolute engine safety."""
+        """Counts a new turn (see total_actions and current_circuit)."""
         self.total_actions += 1
 
     # --- Round end ---
@@ -305,32 +315,36 @@ class GameContext:
         self._record_action(self.player_pickup_counts, self.may_i_target_idx,
                             int(discard_card.suit), int(discard_card.rank))
 
-    # --- Logic Helpers (Placeholders for later tasks) ---
+    # --- Objectives and tensor helpers ---
+
     def check_hand_objective(self, player_idx):
+        """True if the player's hand holds this round's objective melds."""
         hand_tensor = self.players[player_idx].private_hand
         req_sets, req_runs = self.config.objective_map[self.current_round_idx]
 
         return self.find_melds(hand_tensor, req_sets, req_runs) is not None
 
     def _record_action(self, count_tensor, player_idx, suit, rank):
-        """Records a public action into the provided presence tensor."""
+        """Adds one to a player's pickup or discard count for a card (capped at 10)."""
         self._sync_ace(count_tensor[player_idx], suit, rank, increment=True)
 
     def _sync_ace(self, tensor, suit, rank, increment=False):
-        """Helper to keep Ace-Low (0) and Ace-High (13) synced during matrix math."""
-
-        # 1. Convert to standard Python int before math to bypass NumPy scalar warnings
+        """
+        Adds (increment=True) or removes one copy of a card in a count tensor,
+        keeping an Ace's columns 0 and 13 in step. Counts stay between 0 and 10.
+        """
+        # Convert to a Python int first to avoid NumPy scalar overflow warnings
         current_val = int(tensor[suit, rank])
 
         if increment:
-            # Cap at 10 to prevent positive overflow
+            # Cap at 10
             tensor[suit, rank] = min(current_val + 1, 10)
             if rank == 0:
                 tensor[suit, 13] = min(int(tensor[suit, 13]) + 1, 10)
             elif rank == 13:
                 tensor[suit, 0] = min(int(tensor[suit, 0]) + 1, 10)
         else:
-            # Floor at 0 to prevent negative underflow (the 255 hallucination)
+            # Floor at 0 (an unsigned tensor would otherwise wrap round to 255)
             tensor[suit, rank] = max(current_val - 1, 0)
             if rank == 0:
                 tensor[suit, 13] = max(int(tensor[suit, 13]) - 1, 0)
@@ -555,7 +569,7 @@ class GameContext:
             old_top = self.discard_pile[-1]
             self._sync_ace(self.dead_cards, int(old_top.suit), int(old_top.rank), increment=True)
 
-        # 3. Place new card on top of the list (Representing Channel 3)
+        # 3. Place the new card on top
         self.discard_pile.append(card_to_discard)
         self.top_discarder_idx = player_idx
         self.top_discard_available = True
@@ -612,8 +626,8 @@ class GameContext:
 
     def clone(self):
         """
-        Creates a deep copy of the entire game state in RAM.
-        Optimized for high-speed Actor-Critic fast_engine data generation.
+        A deep copy of the game state, so agents can try out moves (look-ahead)
+        without changing the real game.
         """
         # Create a new instance passing the shared immutable config
         new_ctx = GameContext(num_players=self.num_players, config=self.config)
@@ -650,9 +664,10 @@ class GameContext:
 
     def get_oracle_truth(self, player_idx: int) -> np.ndarray:
         """
-        Extracts the absolute ground truth of the opponents' hidden hands.
-        Shape: (3, 4, 14) representing Op1 (Left), Op2 (Across), Op3 (Right).
-        In a 3-player game, Op3 (index 2) is strictly zero-padded.
+        The opponents' actual hands, for measuring how accurate an agent's beliefs
+        are (agents must not use it to play). Shape (3, 4, 14): index 0 is the next
+        player clockwise, then the one after, then the one after that. In a
+        3-player game, index 2 is all zeros.
         """
         oracle_tensor = np.zeros((3, 4, 14), dtype=np.int8)
 

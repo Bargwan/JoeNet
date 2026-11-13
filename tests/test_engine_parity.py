@@ -11,24 +11,20 @@ from engine import JoeEngine as SlowEngine
 class TestEngineParityAndBugs(unittest.TestCase):
 
     def get_state_id(self, engine):
-        """
-        Helper to normalize the state ID across both engine types.
-        Updated to handle hyphens to match the engine-level standardization.
-        """
-        # Handle python-statemachine's new API (SlowEngine)
+        """The current state as a snake_case string, for either engine."""
+        # python-statemachine's API (SlowEngine)
         if hasattr(engine, 'configuration'):
             raw_id = engine.configuration[0].id
         else:
             # Our custom FastEngine
             raw_id = engine.current_state.id
 
-        # --- THE FIX: Standardize hyphens AND spaces ---
         return str(raw_id).lower().replace(' ', '_').replace('-', '_')
 
     def test_auto_stepper_progression(self):
         """
-        Verify Bug #2: The engine requires explicit auto-stepper calls
-        to navigate non-decision initialization states safely.
+        Verify both engines need explicit calls (start_game, deal_cards,
+        enter_pickup) to step through the setup states to the first decision.
         """
         for EngineClass in [FastEngine, SlowEngine]:
             with self.subTest(engine=EngineClass.__module__):
@@ -55,8 +51,8 @@ class TestEngineParityAndBugs(unittest.TestCase):
 
     def test_may_i_target_trap(self):
         """
-        Verify Bug #1: The May-I decision must be evaluated for the target player,
-        not the active player, and the target correctly receives the penalty cards.
+        Verify the May-I decision belongs to the target player, not the active
+        player, and that the target receives the discard plus the penalty card.
         """
         for EngineClass in [FastEngine, SlowEngine]:
             with self.subTest(engine=EngineClass.__module__):
@@ -88,7 +84,7 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 self.assertNotEqual(ctx.may_i_target_idx, ctx.active_player_idx,
                                     "Target CANNOT be the active player")
 
-                # ACT: Player 2 calls the May-I (Action 2)
+                # ACT: The target calls the May-I (action 2)
                 engine.resolve_may_i(2)
 
                 # ASSERT: Data movement

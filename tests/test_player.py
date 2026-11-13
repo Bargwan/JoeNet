@@ -6,7 +6,7 @@ from player import Player
 
 class TestPlayerLogic(unittest.TestCase):
 
-    def test_nn_structure_and_deal(self):
+    def test_receive_cards_updates_counts(self):
         p = Player(player_id=0)
 
         # 1. Create Test Cards using strict constructor
@@ -22,8 +22,7 @@ class TestPlayerLogic(unittest.TestCase):
         # 2. Action: Deal
         p.receive_cards(cards_to_deal)
 
-        # 3. Verify NN State (Logic remains the same)
-        # Ace maps to 0 and 13
+        # 3. Verify the count tensor: an Ace is counted in columns 0 and 13
         self.assertEqual(p.private_hand[Suit.SPADES, 0], 1)
         self.assertEqual(p.private_hand[Suit.SPADES, 13], 1)
 

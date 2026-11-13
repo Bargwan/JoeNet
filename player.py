@@ -1,17 +1,19 @@
 import numpy as np
+
 from cards import Rank
 
+
 class Player:
+    """One player's hand, score and round status."""
+
     def __init__(self, player_id=0):
         self.player_id = player_id
 
-        # The state of a player's hand is simultaneously recorded in two separate properties:
-        # - the `hand_list` which preserves the ID, so knowledge of each distinct card in a 2
-        #   double deck
-        # - the `private_hand` which is a NumPy array counting cards at the rank/suit coordinates
-        #   and optimised for passing to a Neural Network as a tensor input.
-        #       - Shape: (4, 14) -> 4 Suits x 14 Ranks
-        #       - Index 0=Ace(Low), 1=Two, ..., 12=King, 13=Ace(High)
+        # The hand is recorded twice, and the two are kept in step:
+        # - `hand_list`: the Card objects themselves (each copy of the double deck is distinct)
+        # - `private_hand`: counts per card for fast meld searches
+        #       - Shape: (4, 14) -> 4 suits x 14 columns
+        #       - Column 0 = Ace (low), 1 = Two, ..., 12 = King, 13 = Ace (high)
 
         self.hand_list = []
         self.private_hand = np.zeros((4, 14), dtype=np.int8)
@@ -23,9 +25,7 @@ class Player:
     # --- ACTION METHODS ---
 
     def receive_cards(self, cards):
-        """
-        cards: List[Card]
-        """
+        """Adds cards (a list of Card) to the hand."""
         for card in cards:
             self._add_card_to_state(card)
 
@@ -47,7 +47,9 @@ class Player:
 
     def discard(self, suit, rank):
         """
-        Finds card object, removes it, and updates NN tensor.
+        Removes one card of this suit and rank from the hand (any copy) and
+        returns it. Used for every card leaving the hand: discards, going down
+        and placing Key Cards.
         """
         card_to_discard = next((c for c in self.hand_list
                                 if c.suit == suit and c.rank == rank), None)
@@ -70,10 +72,7 @@ class Player:
         return card_to_discard
 
     def clone(self):
-        """
-        Creates a deep copy of the player's state.
-        Used exclusively for high-speed RAM cloning in the fast_engine.
-        """
+        """A deep copy of the player's state (used by GameContext.clone)."""
         new_player = Player(self.player_id)
 
         # Lists and NumPy arrays must be explicitly copied to break references

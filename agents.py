@@ -1,3 +1,12 @@
+"""
+Agents that play Joe. Each agent picks an action number from the legal-action
+mask that GameContext.get_action_mask() builds for the current decision.
+
+- RandomAgent:        picks any legal action.
+- HeuristicAgent:     the rule-based baseline.
+- ProbabilisticAgent: chooses by expected value, using draw probabilities.
+- BayesianAgent:      planned; not implemented yet.
+"""
 import math
 import random
 
@@ -7,7 +16,14 @@ from game_context import END_TABLE_PLAY, ON_SET, PLACE_BASE, decode_card_action,
 
 
 class Agent:
+    """Base class for agents."""
+
     def select_action(self, state_id, ctx, player_idx, action_mask):
+        """
+        Returns the number of the action to take (see the action numbering in
+        game_context). `action_mask` is True for every legal action; the result
+        must be one of them. `state_id` names the decision, e.g. 'pickup_decision'.
+        """
         raise NotImplementedError
 
     def choose_go_down_melds(self, ctx, player_idx):
@@ -19,6 +35,8 @@ class Agent:
 
 
 class RandomAgent(Agent):
+    """Picks a legal action uniformly at random."""
+
     def __init__(self, random_seed=None):
         self.rng = random.Random(random_seed)
 
@@ -30,10 +48,9 @@ class RandomAgent(Agent):
 
 class HeuristicAgent(Agent):
     """
-    The baseline rule-based bot.
-    For the ProbabilisticAgent, this class primarily serves as a fallback handler
-    for strict, rule-bound phases (like playing cards to the table) where
-    complex EV simulation is unnecessary.
+    The rule-based baseline, meant to play like a basic human player.
+    ProbabilisticAgent inherits from it and uses its decisions wherever it has
+    no expected-value logic of its own (e.g. placing Key Cards on the table).
     """
 
     def __init__(self, random_seed=None):
@@ -41,11 +58,15 @@ class HeuristicAgent(Agent):
 
     def select_action(self, state_id, ctx, player_idx, action_mask):
         """
-        Executes heuristic logic for the current phase.
-        Inherited Purpose: The ProbabilisticAgent falls back to this method
-        specifically for the 'table_play_phase'. If a card can be played on the
-        table, it is always mathematically optimal to do so to reduce deadwood,
-        so we let this greedy heuristic handle it instantly rather than simulating it.
+        Chooses an action with simple rules for each decision:
+        - Pickup: take the discard if it fits the table (when down, or when holding
+          the objective) or helps the objective; otherwise draw from the stock.
+        - May-I: call if the discard advances the objective, or from Round 4 on,
+          if it is useful and the hand has 11 cards or fewer.
+        - Go down: go down if that leaves 5 or fewer cards that can't be placed;
+          otherwise go down with a probability that rises with time and threat.
+        - Table play: place every Key Card, preferring runs (at random) to sets.
+        - Discard: discard the card with the lowest synergy score.
         """
         player = ctx.players[player_idx] if ctx and ctx.players else None
         hand = player.hand_list if player else []
@@ -68,7 +89,7 @@ class HeuristicAgent(Agent):
                     return 0
             else:
                 if action_mask[1]:
-                    if self._completes_objective(discard_top, player_idx, ctx):
+                    if self._advances_objective(discard_top, player_idx, ctx):
                         return 1
                     elif self._is_useful_pickup(discard_top, player_idx, ctx):
                         return 1
@@ -82,11 +103,11 @@ class HeuristicAgent(Agent):
         # --- Phase: MAY-I DECISION ---
         elif state_id == 'may_i_decision' and discard_top:
             if action_mask[2]:
-                # 1. Instantly advances meld progress
-                if self._completes_objective(discard_top, player_idx, ctx):
+                # 1. The discard completes another meld towards the objective
+                if self._advances_objective(discard_top, player_idx, ctx):
                     return 2
 
-                # 2. Strategic Capacity Expansion for Late Rounds (3+)
+                # 2. From Round 4 ([3, 3, 3]) on, also call for merely useful cards
                 if ctx.current_round_idx >= 3 and len(hand) <= 11:
                     if self._is_useful_pickup(discard_top, player_idx, ctx):
                         return 2
@@ -97,7 +118,7 @@ class HeuristicAgent(Agent):
         # --- Phase: GO DOWN DECISION ---
         elif state_id == 'go_down_decision':
             if action_mask[4] and ctx.check_hand_objective(player_idx):
-                # Pragmatic Win: Go down if it leaves us with <= 5 penalty cards
+                # Go down if it leaves 5 or fewer cards that can't be placed
                 if self._calculate_projected_deadwood(ctx, player_idx) <= 5:
                     return 4
 
@@ -134,7 +155,7 @@ class HeuristicAgent(Agent):
             best_discard_idx = -1
             lowest_synergy = float('inf')
 
-            # Activate the Gridlock Breaker slightly earlier (Circuit 15)
+            # After 15 circuits, add noise to break repeated discard cycles
             is_stuck = ctx.current_circuit > 15
 
             for card in hand:
@@ -143,11 +164,10 @@ class HeuristicAgent(Agent):
 
                     synergy = self._calculate_synergy(card, hand, ctx, player_idx)
 
-                    # THE GRIDLOCK BREAKER (Entropy Injection)
                     if is_stuck and 0 < synergy < 2000:
                         synergy += self.rng.uniform(-40, 40)
 
-                    # Absolute Objective Immunity
+                    # Never discard a card that the objective progress depends on
                     if not is_down and self._breaks_objective(card, player_idx, ctx, base_progress):
                         synergy += 10000
 
@@ -167,10 +187,6 @@ class HeuristicAgent(Agent):
         if len(valid_actions) > 0:
             return self.rng.choice(valid_actions)
         return -1
-
-    # ==========================================
-    # INTERNAL EVALUATION HELPERS
-    # ==========================================
 
     def choose_go_down_melds(self, ctx, player_idx):
         """
@@ -192,8 +208,16 @@ class HeuristicAgent(Agent):
         lowest = min(score for score, _ in scored)
         return self.rng.choice([melds for score, melds in scored if score == lowest])
 
+    # ==========================================
+    # DECISION HELPERS
+    # ==========================================
+
     def _is_useful_pickup(self, target_card, player_idx, ctx):
-        """Evaluates outstanding needs and prioritizes sequences/pairs accordingly."""
+        """
+        True if the card is near a meld the hand still needs: same rank as a held
+        card (sets), or same suit within 2 ranks of a held card (runs). A duplicate
+        of a held card is refused when only runs are still needed.
+        """
         player = ctx.players[player_idx]
         hand = player.hand_list
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
@@ -231,7 +255,14 @@ class HeuristicAgent(Agent):
         return False
 
     def _calculate_synergy(self, target_card, hand_list, ctx, player_idx):
-        """Refined synergy that dynamically evaluates outstanding needs and Key Cards."""
+        """
+        How much the hand wants to keep this card; the discard logic drops the
+        lowest. Once the objective is held or the player is down, Key Cards score
+        2000 (4000 if the next player is down with 2 or fewer cards, so feeding
+        them is avoided) and everything else 0. Before that, the score counts
+        nearby same-rank / same-suit cards, and duplicates score -500 when only
+        runs are needed.
+        """
         player = ctx.players[player_idx]
         has_objective = ctx.check_hand_objective(player_idx)
         is_down = getattr(player, 'is_down', False)
@@ -274,6 +305,11 @@ class HeuristicAgent(Agent):
         return int(synergy)
 
     def _calculate_projected_deadwood(self, ctx, player_idx):
+        """
+        Number of cards (not points) that would stay in hand after going down
+        with the first valid melds and placing every Key Card. If the objective
+        isn't met, the whole hand.
+        """
         player = ctx.players[player_idx]
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
@@ -294,6 +330,10 @@ class HeuristicAgent(Agent):
         return remaining_count
 
     def _calculate_go_down_probability(self, ctx, player_idx):
+        """
+        Chance of going down now: at least 0.5, rising with circuits played
+        (relative to 8 + round index) and with how few cards a down opponent holds.
+        """
         prob = 0.5
         patience_threshold = 8.0 + ctx.current_round_idx
         turn_pressure = ctx.current_circuit / patience_threshold
@@ -306,7 +346,11 @@ class HeuristicAgent(Agent):
 
         return min(1.0, prob)
 
-    def _completes_objective(self, discard_card, player_idx, ctx):
+    def _advances_objective(self, discard_card, player_idx, ctx):
+        """
+        True if adding this card lets the hand complete more of the objective's
+        melds than before. False if the objective is already met.
+        """
         player = ctx.players[player_idx]
         req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
@@ -322,6 +366,7 @@ class HeuristicAgent(Agent):
         return new_progress > base_progress
 
     def _breaks_objective(self, candidate_card, player_idx, ctx, base_progress):
+        """True if removing this card lowers the objective progress below `base_progress`."""
         if base_progress == 0:
             return False
         player = ctx.players[player_idx]
@@ -335,6 +380,7 @@ class HeuristicAgent(Agent):
         return new_progress < base_progress
 
     def _get_objective_progress(self, tensor, req_sets, req_runs, ctx):
+        """The largest number of the objective's melds this hand can complete."""
         for total in range(req_sets + req_runs, 0, -1):
             for s in range(min(total, req_sets), -1, -1):
                 r = total - s
@@ -344,12 +390,7 @@ class HeuristicAgent(Agent):
         return 0
 
     def _get_deadwood_value(self, card, ctx):
-        """
-        Calculates the literal penalty point value of a single card.
-        Uses: Aces=20, Face Cards=10, Number Cards=5.
-        Rationale: Used by the math engine to quickly look up raw point values
-        without needing matrix multiplication.
-        """
+        """Penalty points for one card: Ace 20, 8 to King 10, 2 to 7 5 (from the config)."""
         rank_val = int(card.rank)
         if rank_val == 0 or rank_val == 13:
             return ctx.config.points_ace
@@ -359,10 +400,8 @@ class HeuristicAgent(Agent):
 
     def _is_playable_on_table(self, card, ctx):
         """
-        Determines if a specific card can be legally appended to any face-up
-        meld currently on the table.
-        Rationale: Identifies "Key Cards" which effectively have 0 penalty
-        risk if the bot successfully goes down.
+        True if the card could legally be placed on some meld on the table
+        (i.e. it would be a Key Card). Same test as GameContext.is_key_card.
         """
         suit, rank = int(card.suit), int(card.rank)
         if np.any(ctx.table_sets[:, rank] > 0):
@@ -376,177 +415,13 @@ class HeuristicAgent(Agent):
         return discard_action(card.suit, card.rank)
 
 
-class OpenHandAgent(HeuristicAgent):
-    """
-    A Phase 1 Data Generator that plays with 'open hands'.
-    Uses Edge-Detection Tensor Math to evaluate the true lifespan of
-    connected clusters, and never hallucinates its own cards.
-    """
-
-    def _get_card_availability(self, suit, rank, ctx, player_idx):
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-        num_players = len(ctx.players)
-        upstream_idx = (player_idx - 1) % num_players
-
-        deck_size = max(1.0, float(len(ctx.deck)))
-        stock_density = 60.0 / deck_size
-
-        total_weight = 2.0 * stock_density
-
-        table_count = ctx.table_sets[suit, rank] + ctx.table_runs[suit, rank]
-        total_weight -= (table_count * stock_density)
-
-        dead_count = ctx.dead_cards[suit, rank]
-        total_weight -= (dead_count * stock_density)
-
-        if deck_size < 15 and dead_count > 0:
-            total_weight += (dead_count * 0.2)
-
-        # FIX 1: DEDUCT OUR OWN HAND! (Cures the Hallucination)
-        my_held = ctx.players[player_idx].private_hand[suit, rank]
-        total_weight -= (my_held * stock_density)
-
-        for i, opp in enumerate(ctx.players):
-            if i == player_idx: continue
-
-            held_count = opp.private_hand[suit, rank]
-            is_building = False
-
-            if req_sets > 0 and np.sum(opp.private_hand[:, rank]) >= 2:
-                is_building = True
-
-            if req_runs > 0 and not is_building:
-                min_idx = max(0, rank - 2)
-                max_idx = min(14, rank + 3)
-                if np.sum(opp.private_hand[suit, min_idx:max_idx]) >= 2:
-                    is_building = True
-
-            if held_count > 0:
-                total_weight -= (held_count * stock_density)
-                for _ in range(held_count):
-                    if is_building:
-                        total_weight += 0.0
-                    elif i == upstream_idx:
-                        total_weight += 2.0
-                    else:
-                        total_weight += 0.5
-            else:
-                if is_building:
-                    total_weight -= (1.0 * stock_density)
-
-        return max(0.0, total_weight)
-
-    def _calculate_synergy(self, target_card, hand_list, ctx, player_idx):
-        player = ctx.players[player_idx]
-        has_objective = ctx.check_hand_objective(player_idx)
-        is_down = getattr(player, 'is_down', False)
-
-        if has_objective or is_down:
-            if self._is_playable_on_table(target_card, ctx):
-                next_player_idx = (player_idx + 1) % len(ctx.players)
-                for i, opp in enumerate(ctx.players):
-                    if i == player_idx: continue
-                    if getattr(opp, 'is_down', False) and len(opp.hand_list) <= 2:
-                        may_is_left = getattr(opp, 'may_is', 0)
-                        if i == next_player_idx or may_is_left > 0:
-                            return 5000
-                return 2000
-            return 0
-
-            # 1. Grab the mathematically proven baseline structure value
-        base_synergy = super()._calculate_synergy(target_card, hand_list, ctx, player_idx)
-
-        # If the baseline sees this as deadwood or a toxic duplicate (<= 0), don't waste time
-        if base_synergy <= 0:
-            return int(base_synergy)
-
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
-        has_sets = ctx.find_melds(player.private_hand, req_sets, 0) is not None
-        has_runs = ctx.find_melds(player.private_hand, 0, req_runs) is not None
-
-        needs_sets = (req_sets > 0) and not has_sets
-        needs_runs = (req_runs > 0) and not has_runs
-
-        suit = target_card.suit.value
-        rank = target_card.rank.value
-
-        final_synergy = float(base_synergy)
-        is_dead = True
-
-        # 2. Evaluate SETS Fertility
-        if needs_sets:
-            # Check current cluster size (including the target card)
-            matches_in_hand = sum(1 for c in hand_list if c.rank == rank and c is not target_card)
-            cluster_size = matches_in_hand + 1
-
-            outs = 0
-            for s in range(4):
-                outs += self._get_card_availability(s, rank, ctx, player_idx)
-
-            if cluster_size >= 3:
-                is_dead = False
-                final_synergy += 500  # Immunity: Completed Set!
-            elif outs > 0:
-                is_dead = False
-                final_synergy += (outs * 5.0)
-
-        # 3. Evaluate RUNS Fertility (Contiguous Edge Detection)
-        if needs_runs:
-            # Trace the tensor to find the actual physical boundaries
-            left_edge = rank
-            while left_edge > 0 and player.private_hand[suit, left_edge - 1] > 0:
-                left_edge -= 1
-
-            right_edge = rank
-            while right_edge < 13 and player.private_hand[suit, right_edge + 1] > 0:
-                right_edge += 1
-
-            cluster_size = right_edge - left_edge + 1
-
-            outs = 0
-            if left_edge > 0:
-                outs += self._get_card_availability(suit, left_edge - 1, ctx, player_idx)
-            if right_edge < 13:
-                outs += self._get_card_availability(suit, right_edge + 1, ctx, player_idx)
-
-            if cluster_size >= 4:
-                is_dead = False
-                final_synergy += 500  # Immunity: Completed Run!
-            elif outs > 0:
-                is_dead = False
-                final_synergy += (outs * 5.0)
-
-        # 4. Risk-Adjusted Aversion (Fatality by Fertility Fix)
-        # We offset the fertility bonus by the card's heavy penalty weight
-        deadwood_val = self._get_deadwood_value(target_card, ctx)
-        final_synergy -= (deadwood_val * 0.5)
-
-        # 5. The True Veto: If it has 0 physical outs and isn't a completed meld, it's dead.
-        if is_dead:
-            return 0
-
-        return int(final_synergy)
-
-    def _is_useful_pickup(self, target_card, player_idx, ctx):
-        is_useful = super()._is_useful_pickup(target_card, player_idx, ctx)
-        if not is_useful:
-            return False
-
-        player = ctx.players[player_idx]
-        expected_synergy = self._calculate_synergy(target_card, player.hand_list, ctx, player_idx)
-
-        if expected_synergy <= 0:
-            return False
-
-        return True
-
-
 class ProbabilisticAgent(HeuristicAgent):
     """
-    A unified Expected Value (EV) engine that navigates imperfect information.
-    It evaluates every decision by generating hypothetical future states,
-    calculating the probability of achieving the round objective, and weighing
-    the expected point reward against the risk of an opponent ending the round.
+    Chooses pickups, May-Is, going down and discards by expected value (EV) in
+    penalty points. Each option is scored by evaluating the hand it would leave:
+    the chance of completing the objective from draw probabilities over the
+    remaining turns, weighed against the chance an opponent ends the round first.
+    Table play is left to HeuristicAgent. See probabilistic_agent_theory.md.
     """
 
     def __init__(self, random_seed=None, expected_horizon_3p=14.5, expected_horizon_4p=10.9):
@@ -614,8 +489,8 @@ class ProbabilisticAgent(HeuristicAgent):
 
     def _get_expected_stock_value(self, ctx, hand_tensor, player_idx):
         """
-        Calculates the exact average point value of a single card pulled blindly
-        from the stock pile at this specific microsecond.
+        Average penalty value of a card not yet seen (stock or opponents' unknown
+        cards), used as the value of a blind stock card.
 
         Rationale: Used to price the "cost" of a May-I penalty card. If all
         Aces and Face cards are visible on the table, the stock is "safe" (~5 pts).
@@ -639,7 +514,7 @@ class ProbabilisticAgent(HeuristicAgent):
         Evaluates the literal Expected Value (EV) of a hand state in penalty points.
 
         Calculates two timelines:
-        1. Timeline A (Imminent Threat): The EV if an opponent ends the game THIS turn.
+        1. Timeline A (Imminent Threat): The EV if an opponent ends the round THIS turn.
            (Results in taking full Deadwood or Total Hand points).
         2. Timeline B (Future Trajectory): The EV if the game continues naturally.
            (Results in blended risk and claiming the Opponents' Penalty Points).
@@ -656,7 +531,6 @@ class ProbabilisticAgent(HeuristicAgent):
         else:
             req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
 
-            # 2. Update this call to pass the offset down:
             p_win, slotted_mask = self._find_best_seed_allocation(
                 hand_tensor, req_sets, req_runs, ctx, player_idx, horizon_offset=horizon_offset
             )
@@ -721,7 +595,7 @@ class ProbabilisticAgent(HeuristicAgent):
         future_blended_penalty = (p_win * deadwood_points) + (
                     (1.0 - p_win) * total_hand_points)
 
-        # THE FIX: Multiply our personal penalty risk by the number of opponents
+        # Our penalty is weighed against each opponent separately, so it counts once per opponent
         expected_penalty_risk = num_opponents * ((p_lose * current_physical_penalty) + (
                     (1.0 - p_lose) * future_blended_penalty))
 
@@ -795,12 +669,10 @@ class ProbabilisticAgent(HeuristicAgent):
 
     def _get_available_tensor(self, ctx, hand_tensor, player_idx):
         """
-        Subtracts globally visible cards, our hand, and cards legally known to be
-        in opponents' hands from a master (2x) double deck.
-
-        Rationale: Creates the absolute ground-truth "Outs" matrix. By tracking
-        opponent pickups, the bot avoids hallucinating that a card is in the deck
-        when it physically watched an opponent pick it up.
+        Copies (0-2) of each card not yet accounted for: two of every card, minus
+        the table melds, buried discards, our hand, and cards opponents are known
+        to hold (picked up and not discarded since). The top discard and the
+        opponents' unseen cards are counted as available.
         """
         # 1. Start with the globally visible cards and our own hand
         known_tensor = (ctx.table_sets +
@@ -821,6 +693,11 @@ class ProbabilisticAgent(HeuristicAgent):
         return np.clip(2 - known_tensor, 0, 2)
 
     def _calculate_seed_probability(self, seed, ctx, hand_tensor, player_idx, horizon_offset=0):
+        """
+        Chance of completing a partial meld (seed) within the turns expected to
+        remain this round (expected round length minus circuits played, plus
+        `horizon_offset`).
+        """
         if seed['distance'] == 0:
             return 1.0
 
@@ -860,8 +737,9 @@ class ProbabilisticAgent(HeuristicAgent):
     def _find_best_seed_allocation(self, hand_tensor, req_sets,
                                    req_runs, ctx, player_idx, horizon_offset=0):
         """
-        Dynamic Greedy Algorithm.
-        Achieves optimal seed allocation without the exponential compute overhead of a DFS.
+        Greedily picks, one meld at a time, the seed most likely to be completed,
+        and multiplies their chances into p_win (greedy, so not guaranteed best).
+        Returns (p_win, mask of the cards the chosen seeds use).
         """
         p_win = 1.0
         slotted_mask = np.zeros((4, 14), dtype=np.int8)
@@ -879,7 +757,6 @@ class ProbabilisticAgent(HeuristicAgent):
             if not current_seeds:
                 break
 
-                # 2. Update this loop to pass the offset down:
             for seed in current_seeds:
                 seed['ev'] = self._calculate_seed_probability(seed, ctx, working_hand, player_idx,
                                                               horizon_offset=horizon_offset)
@@ -909,7 +786,7 @@ class ProbabilisticAgent(HeuristicAgent):
             # Accumulate the total probability
             p_win *= best_seed['ev']
 
-        # 5. Apply Additive Smoothing for unfulfilled requirements
+        # 5. Each meld with no seed at all multiplies p_win by 0.01
         missing_sets = req_sets - sets_found
         missing_runs = req_runs - runs_found
 
@@ -958,7 +835,8 @@ class ProbabilisticAgent(HeuristicAgent):
         - Pickup Phase: Simulates the EV of a Full Turn (Pickup + Best Discard).
         - May-I Phase: Compares baseline EV against the EV of expanding the hand,
           minus the dynamic expected risk of the blind stock card.
-        - Go Down Phase: Deterministically locks in melds to secure EV safety.
+        - Go Down Phase: Compares the EV of waiting with the EV of going down and
+          placing every Key Card (which also opens the table to opponents).
 
         Rationale: Converts static rules into dynamic, localized math. The bot
         "feels" the weight of every action by looking exactly one turn into the future.
@@ -1020,8 +898,7 @@ class ProbabilisticAgent(HeuristicAgent):
                             if ev > best_post_discard_ev:
                                 best_post_discard_ev = ev
 
-                # THE UPDATE: We are now dealing in literal Penalty Points.
-                # Only pick up the discard if it statistically saves us at least 1 overall point.
+                # Only pick up the discard if it is worth at least 1 penalty point.
                 if best_post_discard_ev > baseline_ev + 1.0:
                     return 1
 
@@ -1056,14 +933,13 @@ class ProbabilisticAgent(HeuristicAgent):
             available_est = self._get_available_tensor(ctx, hand_tensor, player_idx)
             unknown_size_est = float(np.sum(available_est[:, 0:13]))
 
-            # Uses the DRY refactored helper method
             p_lose_est = self._calculate_avalanche_threat(ctx, player_idx, available_est,
                                                           unknown_size_est)
 
             # The expected cost remains bound to a strict 1-turn sudden death evaluation
             ev_cost_of_blind_card = stock_pts * p_lose_est
 
-            # 3. Pure Mathematical Comparison (No + 2.0 heuristic!)
+            # 3. Call if the extra card is worth more than the blind stock card costs
             if (pickup_ev - ev_cost_of_blind_card) > baseline_ev:
                 return 2
 
@@ -1109,33 +985,36 @@ class ProbabilisticAgent(HeuristicAgent):
 
 class BayesianAgent(ProbabilisticAgent):
     """
-        An advanced Player-Profiling engine that evolves the ProbabilisticAgent
-        by replacing uniform deck assumptions with Bayesian Inference.
+    Planned; not implemented yet. Intended design:
 
-        While the ProbabilisticAgent treats all unknown cards as a randomized
-        uniform distribution, the BayesianAgent maintains a persistent
-        'Observation Tensor' to track the specific 'scents' of opponents' hands.
-        By analyzing pickup and discard history, it builds a non-uniform
-        probability heatmap of the hidden state.
+    Belief tensor
+        4 suits x 13 ranks x (N players + 3) layers: one per player, plus the
+        stock, the discard pile and the table melds. Each cell is the expected
+        number of copies (0-2) of that card in that place. Every card's copies
+        sum to 2 across the layers, and each player's layer sums to their hand size.
 
-        Key Objectives:
-        1. Cures the 'Average Card Fallacy': Recognizes that the deck is not
-           randomly distributed but filtered by the heuristic biases of
-           opponents.
-        2. Identifies 'Toxic Seeds': Detects when an opponent is building a
-           specific suit or rank, allowing the bot to pivot its own strategy
-           or intentionally hoard 'sparks' to starve the opponent.
-        3. Optimizes 4-Player Horizons: Mathematically slows down the
-           'Heuristic Swarm' by denying high-probability connections,
-           forcing the game into a turn-count window where EV-logic can
-           reliably dominate.
+    Updates
+        - After the deal: each unknown card is spread over the opponents' hands
+          and the stock as for 11 cards dealt without replacement from 104.
+        - Own hand, the top discard and the table melds are known exactly.
+        - An opponent's pickup or May-I places that card in their hand, and a
+          likelihood matrix for the round objective (52 x 52, P(other card in hand
+          | card picked up)) raises the chance of related cards in their hand.
+        - An opponent's discard uses the matching likelihood the other way: cards
+          related to the discard become less likely in their hand.
+        - After every update, all layers are rebalanced so both sums still hold.
+        The likelihood matrices are to be tuned later by optimisation.
 
-        Implementation Details:
-        - Inherits the 1-Ply Stochastic Lookahead and Master EV Equation
-          from ProbabilisticAgent.
-        - Overrides `_get_available_tensor` to return a weighted probability
-          matrix (Heatmap) instead of a flat frequency count.
-        - Introduces a persistent 'Observation Memory' to update player
-          suit/rank probabilities after every turn.
+    Decisions
+        - Pickup: score every possible meld (208 sets, 44 runs) by how likely the
+          agent is to complete it. Cards on the table are gone, buried discards are
+          locked until the stock is rebuilt, cards in upstream opponents' partial
+          melds are unlikely, and own cards are certain. Take the discard if it
+          raises the hand's potential more than an average stock card would.
+        - Discard: the same in reverse.
+        - May-I: as pickup, but counting the penalty card and needing a larger gain.
+        - Going down: weigh opponents' estimated progress and, once down, deadwood.
+        - Placing Key Cards: avoid unlocking an opponent's hand, or occasionally
+          unlock one to make another opponent bust.
     """
     pass

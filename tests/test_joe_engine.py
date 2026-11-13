@@ -1,6 +1,5 @@
 import unittest
 
-# from engine import JoeEngine
 from fast_engine import JoeEngine
 from game_context import GameContext
 from tests.test_utils import verify_mass_integrity
@@ -8,23 +7,15 @@ from tests.test_utils import verify_mass_integrity
 
 class TestJoeEngine(unittest.TestCase):
     """
-        Unit tests for the JoeEngine state machine.
+    Unit tests for fast_engine.JoeEngine. Most tests "teleport" the engine into a
+    state and set up the GameContext directly, then fire one transition.
 
-        ACTION INTEGER MAPPING REFERENCE:
-        To optimize for microsecond inference speed during RL data generation,
-        the engine uses strict integer routing instead of string comparisons.
-
-        Control Actions:
-            0 = PICK_STOCK
-            1 = PICK_DISCARD
-            2 = CALL_MAY_I
-            3 = PASS
-            4 = GO_DOWN
-            5 = WAIT (during go_down_decision) or END_TABLE_PLAY (during table_play_phase)
-
-        Card Actions (6 through 57):
-            Mapped dynamically using the formula: 6 + (Suit * 13) + Rank
-        """
+    Action numbers (see the constants in game_context):
+        0 = PICK_STOCK, 1 = PICK_DISCARD, 2 = CALL_MAY_I, 3 = PASS, 4 = GO_DOWN,
+        5 = WAIT (go_down_decision) or END_TABLE_PLAY (table_play_phase).
+    Discard and table-play transitions take a hand index (and, for table play,
+    a destination), not an action number.
+    """
 
     def setUp(self):
         self.ctx = GameContext()
@@ -44,7 +35,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.start_game()
         self.engine.deal_cards()  # This rotates the active player!
 
-        # 3. MOCK: Clear the ACTIVE player's hand (now safely pointing at Player 1)
+        # 3. MOCK: Replace the active player's hand (the player after the dealer)
         player = self.ctx.active_player
         player.hand_list = []
         player.private_hand.fill(0)
@@ -102,7 +93,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_pickup_discard_logic(self):
         """
-        Intent: Verify the mechanics of the 1 action during the pickup phase.
+        Intent: Verify PICK_DISCARD (action 1) moves the top discard into the hand.
         """
         # 1. Teleport the Data Layer
         self.ctx.active_player_idx = 0
@@ -110,13 +101,13 @@ class TestJoeEngine(unittest.TestCase):
         target_card = Card(Suit.SPADES, Rank.ACE, deck_index=0)
         self.ctx.discard_pile.append(target_card)
 
-        # NEW: Give the player a card so the engine doesn't instantly end the game!
+        # Give the player a card so the round doesn't end on an empty hand
         dummy_card = self.ctx.deck.pop()
         self.ctx.active_player.receive_cards([dummy_card])
 
         # Verify baseline data state
         self.assertEqual(len(self.ctx.discard_pile), 1)
-        self.assertEqual(len(self.ctx.active_player.hand_list), 1)  # Changed from 0 to 1
+        self.assertEqual(len(self.ctx.active_player.hand_list), 1)
 
         # --- INTEGRITY CHECK: Snapshot mass before action ---
         initial_mass = verify_mass_integrity(self, self.ctx)
@@ -343,9 +334,8 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_go_down_decision_action_go_down(self):
         """
-        Intent: Verify that choosing GO_DOWN transitions the player through the
-        placement phases, moves the meld cards out of their hand, and lands
-        on discard_phase.
+        Intent: Verify that choosing GO_DOWN lays the meld cards on the table,
+        marks the player as down, and lands on table_play_phase.
         """
         from cards import Card, Rank, Suit
 
@@ -372,24 +362,17 @@ class TestJoeEngine(unittest.TestCase):
         # 3. ACT: Fire the GO_DOWN decision
         self.engine.resolve_go_down(4)
 
-        # Currently, your engine does not automatically trigger commit_melds()
-        # when entering the 'going_down' state. We manually fire it here to
-        # continue the chain, but this highlights a missing automation link.
-        if self.engine.state_id == "going_down":
-            self.engine.commit_melds()
-
         # 4. ASSERT: State Routing
         self.assertEqual(
             self.engine.state_id,
-            "table_play_phase",  # <-- UPDATED
+            "table_play_phase",
             "Engine should route to table_play_phase after placing melds, waiting for agent."
         )
 
         # 5. ASSERT: Data Movement (Cards move to table)
         self.assertTrue(player.is_down, "Player should be marked as down.")
-
-        # Note: Hand size will remain 7 here until we actually implement the
-        # engine's commit_melds data movement logic, but the routing is correct.
+        self.assertEqual(len(player.hand_list), 1, "Only the extra 3 of Clubs should remain.")
+        self.assertEqual(int(self.ctx.table_sets[:, :13].sum()), 6, "Both sets should be on the table.")
 
     def test_auto_place_cards_updates_table_tensors(self):
         """
@@ -475,7 +458,7 @@ class TestJoeEngine(unittest.TestCase):
         # 4. ASSERT: State Routing
         self.assertEqual(
             self.engine.state_id,
-            "table_play_phase",  # <-- UPDATED
+            "table_play_phase",
             "Engine should skip 'go_down_decision' and land on 'table_play_phase' "
             "if player is already down."
         )
@@ -523,7 +506,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_discard_exit(self):
         """
-        Task 10.g (Discard Exit): Verify that discarding the last card
+        Verify that discarding the last card
         transitions the state to round_end.
         """
         from cards import Card, Rank, Suit
@@ -559,7 +542,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_round_end_to_dealing(self):
         """
-        Task 10i (Next Round): Verify that if the tournament is not over,
+        Verify that if the tournament is not over,
         resolving the round end loops back to the dealing state.
         """
         # 1. Setup Data Layer
@@ -580,7 +563,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_round_end_to_game_over(self):
         """
-        Task 10j (Game Over): Verify that if the tournament is over (Round 7),
+        Verify that if the tournament is over (Round 7),
         resolving the round end transitions to game_over.
         """
         # 1. Setup Data Layer
@@ -602,7 +585,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_calculate_scores_and_increment_round(self):
         """
-        Task 13 (Scoring Engine): Verify terminal scores are calculated dynamically
+        Verify terminal scores are calculated dynamically
         by querying the injected JoeConfig based on remaining cards in hand,
         and that the round index successfully increments.
         """
@@ -650,31 +633,31 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_action_counter_progression_and_reset(self):
         """
-        Verify that total_actions increments correctly during turns
-        and that current_circuit accurately calculates full board loops.
+        Verify that total_actions (the turn counter) goes up by one per turn,
+        that current_circuit is turns divided by players, and both reset on a new deal.
         """
-        # 1. Start of game (0 actions)
-        self.ctx.execute_deal()  # <--- FIX: Physically deal cards and reset math
-        self.engine.deal_cards()  # Trigger state transition
+        # 1. Start of the round
+        self.ctx.execute_deal()  # deals the cards and resets the turn count
+        self.engine.deal_cards()  # starts the first turn
 
-        self.assertEqual(self.ctx.total_actions, 1, "First turn should be action 1")
+        self.assertEqual(self.ctx.total_actions, 1, "The first turn should be turn 1")
         self.assertEqual(self.ctx.current_circuit, 0, "Not a full circuit yet")
 
-        # 2. Simulate a full round of discards to complete 1 circuit (4 actions total)
-        self.engine.perform_discard(0)  # P0's turn -> Advances to Action 2
-        self.engine.perform_discard(0)  # P1's turn -> Advances to Action 3
-        self.engine.perform_discard(0)  # P2's turn -> Advances to Action 4
+        # 2. Three discards start turns 2, 3 and 4
+        self.engine.perform_discard(0)
+        self.engine.perform_discard(0)
+        self.engine.perform_discard(0)
 
-        # We are now on Player 3's turn, having completed 1 full circuit
+        # Turn 4 has started: 4 turns / 4 players = circuit 1
         self.assertEqual(self.ctx.total_actions, 4)
         self.assertEqual(self.ctx.current_circuit, 1)
 
         # 3. Force a round transition (e.g. by someone going out)
         # We simulate the reset by manually triggering the deal again
-        self.ctx.execute_deal()  # <--- FIX: Physically deal cards and reset math
+        self.ctx.execute_deal()  # deals the cards and resets the turn count
         self.engine.deal_cards()
 
-        self.assertEqual(self.ctx.total_actions, 1, "Action counter must reset on new deal")
+        self.assertEqual(self.ctx.total_actions, 1, "The turn counter must reset on a new deal")
         self.assertEqual(self.ctx.current_circuit, 0)
 
     def test_may_i_decision_action_pass(self):
@@ -842,10 +825,10 @@ class TestJoeEngine(unittest.TestCase):
             "Active player should be Player 2 (Dealer + 1)"
         )
 
-    def test_may_i_terminates_before_discarder(self):
+    def test_may_i_skips_the_discarder(self):
         """
-        Intent: Verify that the May-I loop terminates and returns control to the
-        active player BEFORE asking the player who just discarded the card.
+        Intent: Verify that the May-I offer never asks the player who discarded
+        the card, and returns control to the active player once it has gone round.
         """
         from cards import Card, Rank, Suit
 
@@ -874,13 +857,10 @@ class TestJoeEngine(unittest.TestCase):
         self.assertEqual(self.ctx.may_i_target_idx, 3)
 
         # 4. ACT: Player 3 passes.
-        # The pointer will now move to Player 0.
         self.engine.resolve_may_i(3)
 
-        # 5. ASSERT: The loop must terminate.
-        # The engine's 'all_targets_checked' guard should instantly catch that
-        # Player 0 is the discarder. It should skip the 'may_i_decision' state
-        # entirely and return control to the active player.
+        # 5. ASSERT: Player 0 (the discarder) is skipped as ineligible, and the
+        # offer ends on reaching the active player again.
         #
         # Note: Control returns via 'processing_pickup', which immediately evaluates
         # Player 1's hand. Because Player 1 has a weak hand, it auto-routes to 'discard_phase'.
@@ -893,7 +873,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_table_play_phase_play_card(self):
         """
-        Task 10.5a (Play Card): Verify triggering perform_table_play moves
+        Verify triggering perform_table_play moves
         a single card from the hand to the table and loops back to table_play_phase.
         """
         from cards import Card, Rank, Suit
@@ -906,7 +886,7 @@ class TestJoeEngine(unittest.TestCase):
 
         self.ctx.table_sets[Suit.SPADES, Rank.SEVEN] = 1
 
-        # Teleport to new state (This will immediately fail because the state doesn't exist yet)
+        # Teleport to table_play_phase
         self.engine.current_state = self.engine.table_play_phase
 
         # ACT: Play the card at index 0 onto the set
@@ -927,7 +907,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_table_play_phase_end_play(self):
         """
-        Task 10.5b (End Play): Verify triggering end_table_play routes to
+        Verify triggering end_table_play routes to
         discard_phase if cards remain, or round_end if the hand is empty.
         """
         from cards import Card, Rank, Suit
