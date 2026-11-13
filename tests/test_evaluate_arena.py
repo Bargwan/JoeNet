@@ -146,5 +146,20 @@ class TestEvaluationArena(unittest.TestCase):
         )
 
 
+    def test_each_round_is_scored_exactly_once(self):
+        """A full game scores 7 rounds; the final round must not be scored again at game over."""
+        import random
+
+        from evaluate_arena import _worker_simulate_single_game
+
+        random.seed(0)
+        config = TournamentConfig(name="Scoring", agents=[HeuristicAgent(random_seed=i)
+                                                          for i in range(4)], num_games=1)
+        with patch.object(GameContext, 'calculate_scores', autospec=True,
+                          side_effect=GameContext.calculate_scores) as scorer:
+            _worker_simulate_single_game(config)
+        self.assertEqual(scorer.call_count, 7)
+
+
 if __name__ == '__main__':
     unittest.main()

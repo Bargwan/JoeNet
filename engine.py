@@ -92,11 +92,17 @@ class JoeEngine(StateMachine):
             go_down_decision.to(going_down, cond="action_is_go_down")
             | go_down_decision.to(discard_phase, cond="action_is_wait")
     )
-    commit_melds = going_down.to(table_play_phase)
+    commit_melds = (
+            going_down.to(round_end, cond="stalemate_reached")
+            | going_down.to(table_play_phase)
+    )
 
     # --- Phase: Table Play ---
     perform_table_play = table_play_phase.to(processing_table_play)
-    evaluate_table_play = processing_table_play.to(table_play_phase)
+    evaluate_table_play = (
+            processing_table_play.to(round_end, cond="stalemate_reached")
+            | processing_table_play.to(table_play_phase)
+    )
     end_table_play = (
             table_play_phase.to(round_end, cond="hand_is_empty")
             | table_play_phase.to(discard_phase, cond="hand_not_empty")
@@ -106,7 +112,7 @@ class JoeEngine(StateMachine):
     perform_discard = discard_phase.to(processing_discard)
     evaluate_discard_result = (
             processing_discard.to(round_end, cond="hand_is_empty")
-            | processing_discard.to(round_end, cond="max_turns_reached")
+            | processing_discard.to(round_end, cond="round_cap_reached")
             | processing_discard.to(start_turn, cond="hand_not_empty")
     )
 
@@ -167,8 +173,12 @@ class JoeEngine(StateMachine):
     def is_tournament_over(self):
         return self.ctx.current_round_idx >= 7
 
-    def max_turns_reached(self):
-        return self.ctx.total_actions >= self.ctx.config.max_actions
+    def round_cap_reached(self):
+        return self.ctx.round_cap_reached()
+
+    def stalemate_reached(self):
+        # A player with no cards left has gone out instead, which ends the round normally.
+        return bool(self.ctx.active_player.hand_list) and self.ctx.is_stalemate()
 
     # ========================================================================
     # 4. CALLBACKS (Action Hooks)

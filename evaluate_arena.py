@@ -16,13 +16,13 @@ def _find_card_in_hand(player, suit, rank):
     raise ValueError(f"Card {suit}-{rank} not found in player's hand!")
 
 
-def _log_stalemate_hands(ctx):
-    """Dumps the exact hand states of all players to a log file when a stalemate occurs."""
-    log_file = "stalemate_tracker.log"
+def _log_round_cap_hands(ctx):
+    """Dumps every player's hand to a log file when a round hits the max_turns safety net."""
+    log_file = "round_cap_tracker.log"
 
     with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"=== STALEMATE DETECTED (Circuit {ctx.current_circuit}) ===\n")
-        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        f.write(f"=== ROUND CAP REACHED (Circuit {ctx.current_circuit}) ===\n")
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx - 1]
         f.write(f"Round {ctx.current_round_idx} Objective: {req_sets} Sets, {req_runs} Runs\n\n")
 
         for p in ctx.players:
@@ -78,6 +78,7 @@ def _worker_simulate_single_game(config):
     down_and_out_wins = 0
     true_strategic_detonations = 0
     stalemates = 0
+    round_caps = 0
 
     round_actions = []
     round_turns = []
@@ -97,24 +98,7 @@ def _worker_simulate_single_game(config):
         state_id = raw_state_id.lower().replace(' ', '_').replace('-', '_')
 
         if state_id == 'game_over':
-            ctx.calculate_scores()
-            break
-
-        if ctx.current_circuit >= ctx.config.max_turns:
-            if config.log_stalemates:
-                _log_stalemate_hands(ctx)
-
-            stalemates += 1
-            round_actions.append(ctx.total_actions)
-            round_turns.append(ctx.current_circuit)
-
-            ctx.calculate_scores()
-            if ctx.current_round_idx >= config.rounds_per_game:
-                break
-            else:
-                engine.current_state = engine.dealing
-                engine.on_enter_dealing()
-                continue
+            break  # the engine has already scored the final round
 
         if state_id == 'dealing':
             engine.deal_cards()
@@ -152,6 +136,14 @@ def _worker_simulate_single_game(config):
         if ctx.current_round_idx > prev_round_idx:
             round_actions.append(actions_before)
             round_turns.append(turns_before)
+            if ctx.last_round_result == 'stalemate':
+                stalemates += 1
+                continue
+            if ctx.last_round_result == 'cap':
+                round_caps += 1
+                if config.log_round_caps:
+                    _log_round_cap_hands(ctx)
+                continue
             if active_idx == 0:
                 target_round_wins += 1
                 if agent_0_went_down_this_turn:
@@ -184,6 +176,7 @@ def _worker_simulate_single_game(config):
         'down_and_out_wins': down_and_out_wins,
         'strategic_detonations': true_strategic_detonations,
         'stalemates': stalemates,
+        'round_caps': round_caps,
         'round_actions': round_actions,
         'round_turns': round_turns
     }
@@ -195,7 +188,7 @@ class TournamentConfig:
     agents: list
     num_games: int = 100
     rounds_per_game: int = 7
-    log_stalemates: bool = False  # <-- NEW: Defaults to False so it doesn't spam standard runs
+    log_round_caps: bool = False  # Log the hands of rounds ended by the max_turns safety net
 
     def __post_init__(self):
         if not (3 <= len(self.agents) <= 4):
@@ -250,6 +243,7 @@ class TournamentRunner:
         total_down_and_out = sum(r['down_and_out_wins'] for r in results)
         total_detonations = sum(r['strategic_detonations'] for r in results)
         total_stalemates = sum(r['stalemates'] for r in results)
+        total_round_caps = sum(r['round_caps'] for r in results)
 
         all_point_diffs = []
         all_actions = []  # NEW
@@ -275,18 +269,20 @@ class TournamentRunner:
             "down_and_out_wins": float(total_down_and_out),
             "strategic_detonations": float(total_detonations),
             "simulation_time": elapsed,
-            "stalemates": float(total_stalemates)
+            "stalemates": float(total_stalemates),
+            "round_caps": float(total_round_caps),
         }
 
         print("\n--- BASELINE RESULTS (Agent 0) ---")
         print(f"Tournament Win Rate:   {final_metrics['tournament_win_rate']:.1f}%")
         print(f"Round Win Rate:        {final_metrics['round_win_rate']:.1f}%")
         print(f"Avg Point Diff:        {final_metrics['avg_point_diff']:.1f} pts")
-        print(f"Avg Actions / Round:   {avg_actions:.1f}")  # NEW
-        print(f"Avg Turns / Round:     {avg_turns:.1f}")  # NEW
+        print(f"Avg Turns / Round:     {avg_actions:.1f}")
+        print(f"Avg Circuits / Round:  {avg_turns:.1f}")
         print(f"Down and Out Wins:     {final_metrics['down_and_out_wins']:.0f}")
         print(f"Strategic Detonations: {final_metrics['strategic_detonations']:.0f}")
         print(f"Stalemates:            {final_metrics['stalemates']:.0f}")
+        print(f"Rounds Hit Turn Cap:   {final_metrics['round_caps']:.0f}")
         print(f"Time:                  {elapsed:.2f}s")
         print("=" * 50)
 

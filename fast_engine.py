@@ -122,14 +122,25 @@ class JoeEngine:
             self.current_state = self.discard_phase
 
     def commit_melds(self):
-        self.current_state = self.table_play_phase
+        self._continue_table_play()
 
     def perform_table_play(self, card_index, destination):
         self.current_state = self.processing_table_play
         self.on_enter_processing_table_play(card_index, destination)
 
     def evaluate_table_play(self):
-        self.current_state = self.table_play_phase
+        self._continue_table_play()
+
+    def _continue_table_play(self):
+        """
+        After melds change, the round ends at once if it is a stalemate (rules.md Section 8).
+        A player with no cards left has gone out instead, which ends the round normally.
+        """
+        if self.ctx.active_player.hand_list and self.ctx.is_stalemate():
+            self.current_state = self.round_end
+            self.on_enter_round_end()
+        else:
+            self.current_state = self.table_play_phase
 
     def end_table_play(self):
         if len(self.ctx.active_player.hand_list) == 0:
@@ -146,10 +157,7 @@ class JoeEngine:
         if len(self.ctx.active_player.hand_list) == 0:
             self.current_state = self.round_end
             self.on_enter_round_end()
-        elif self.ctx.total_actions >= self.ctx.config.max_actions:
-            self.current_state = self.round_end
-            self.on_enter_round_end()
-        elif self.ctx.current_circuit >= self.ctx.config.max_turns:
+        elif self.ctx.round_cap_reached():
             self.current_state = self.round_end
             self.on_enter_round_end()
         else:

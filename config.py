@@ -12,13 +12,9 @@ class JoeConfig:
     points_eight_to_king: int = 10
     points_two_to_seven: int = 5
 
-    # A "turn" is defined as one complete circuit of the board (all players).
-    # 15 circuits will roughly exhaust the 60-card Stock Pile once.
+    # Engine safety net (not a rule): a round is ended and scored normally after this many
+    # full circuits of the table. ~15 circuits of 4 players exhaust the 59-card stock once.
     max_turns: int = 100
-
-    # An "action" is an individual decision point (Pickup, May-I, Discard, etc.)
-    # Used strictly as an absolute engine failsafe against infinite loops.
-    max_actions: int = 1000
 
     # Round Index -> (Sets Needed, Runs Needed)
     objective_map: Dict[int, Tuple[int, int]] = field(default_factory=lambda: {

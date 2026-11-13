@@ -108,6 +108,8 @@ class GameContext:
         # Whether the top discard can be taken. False once it has been taken and the
         # card beneath exposed: that card stays buried (see dead_cards).
         self.top_discard_available = True
+        # How the last round ended: 'out', 'stalemate' or 'cap' (see calculate_scores).
+        self.last_round_result = None
 
     # --- Turn Management ---
 
@@ -182,29 +184,50 @@ class GameContext:
         """Increments the global action counter for absolute engine safety."""
         self.total_actions += 1
 
+    # --- Round end ---
+
+    def table_is_closed(self):
+        """
+        True when no meld on the table can be extended, because every card that could
+        extend one is already on the table (rules.md Section 1, "Closed Table"):
+        every set holds all 8 cards of its rank, and every run end is an Ace or both
+        copies of the next card are on the table.
+        """
+        for suit in range(4):
+            for rank in range(13):
+                on_table = int(self.table_sets[suit, rank]) + int(self.table_runs[suit, rank])
+                if on_table < 2 and self.placement_destinations(suit, rank):
+                    return False
+        return True
+
+    def is_stalemate(self):
+        """Every player is down and the table is closed (rules.md Section 8)."""
+        return all(p.is_down for p in self.players) and self.table_is_closed()
+
+    def round_cap_reached(self):
+        """
+        Engine safety net, not a rule: ends a round that has run for config.max_turns
+        full circuits of the table. Such a round is scored normally.
+        """
+        return self.current_circuit >= self.config.max_turns
+
     def calculate_scores(self):
         """
-        Tallies penalty points for all cards remaining in players' hands
-        based on the injected config, adds them to player scores,
-        and advances the tournament round.
+        Scores the round (rules.md Sections 8 and 9), records how it ended in
+        last_round_result ('out', 'stalemate' or 'cap'), and advances to the next round.
+        A player who has gone out ended the round, so it is never a stalemate.
         """
-        for player in self.players:
-            round_penalty = 0
-            for card in player.hand_list:
-                rank_val = int(card.rank)
+        if any(not p.hand_list for p in self.players):
+            self.last_round_result = 'out'
+        elif self.is_stalemate():
+            self.last_round_result = 'stalemate'
+        else:
+            self.last_round_result = 'cap'
 
-                if rank_val == 0:  # ACE
-                    round_penalty += self.config.points_ace
-                elif 7 <= rank_val <= 12:  # EIGHT (7) through KING (12)
-                    round_penalty += self.config.points_eight_to_king
-                elif 1 <= rank_val <= 6:  # TWO (1) through SEVEN (6)
-                    round_penalty += self.config.points_two_to_seven
+        if self.last_round_result != 'stalemate':
+            for idx, player in enumerate(self.players):
+                player.score += self.hand_penalty(idx)
 
-            # Add the accrued penalty points to the player's total score
-            # (Assumes your Player class has a 'score' attribute initialized to 0)
-            player.score += round_penalty
-
-        # Advance the tournament boundary marker
         self.current_round_idx += 1
 
     # --- Stock & discard pile ---

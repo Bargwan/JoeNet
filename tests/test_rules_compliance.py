@@ -23,6 +23,7 @@ from game_context import (
     RUN_HIGH_END,
     RUN_LOW_END,
     GameContext,
+    TableRun,
     place_action,
 )
 from tests.test_utils import verify_mass_integrity
@@ -550,3 +551,123 @@ def test_may_i_caller_takes_the_last_stock_card(engine_cls):
     # c was exposed by the May-I, so it stays buried until the active player covers it.
     assert ctx.dead_cards[:, :13].sum() == 1
     assert ctx.dead_cards[int(c.suit), int(c.rank)] == 1
+
+
+# ---------------------------------------------------------------------------
+# Section 8: Stalemate
+# ---------------------------------------------------------------------------
+
+def nearly_closed_table(num_players=4):
+    """
+    Everyone is down. On the table: a set of 2s (all 8), a set of 7s missing one ♣7,
+    and the run ♥3-4-5-6, whose ends (♥2, ♥7) are both fully used by the sets.
+    Only the missing ♣7 can still be placed.
+    """
+    ctx = GameContext(num_players=num_players)
+    for p in ctx.players:
+        p.hand_list.clear()
+        p.private_hand.fill(0)
+        p.is_down = True
+    for suit in (S, H, C, D):
+        ctx.table_sets[suit, Rank.TWO] = 2
+        ctx.table_sets[suit, Rank.SEVEN] = 2
+    ctx.table_sets[C, Rank.SEVEN] = 1
+    ctx.runs_on_table.append(TableRun(H, Rank.THREE, Rank.SIX))
+    for rank in ranks(3, 6):
+        ctx.table_runs[H, rank] = 1
+    return ctx
+
+
+def test_table_with_a_placeable_card_left_is_not_closed():
+    ctx = nearly_closed_table()
+    assert not ctx.table_is_closed()
+    assert not ctx.is_stalemate()
+
+
+def test_runs_blocked_by_full_sets_close_the_table():
+    ctx = nearly_closed_table()
+    ctx.table_sets[C, Rank.SEVEN] = 2
+    assert ctx.table_is_closed()
+    assert ctx.is_stalemate()
+
+
+def test_runs_ending_in_aces_are_closed():
+    ctx = GameContext(num_players=3)
+    for p in ctx.players:
+        p.is_down = True
+    ctx.runs_on_table.append(TableRun(S, 0, 13))  # ♠A-2-...-K-A
+    for rank in range(14):
+        ctx.table_runs[S, rank] = 1
+    assert ctx.is_stalemate()
+
+
+def test_no_stalemate_while_a_player_is_not_down():
+    ctx = nearly_closed_table()
+    ctx.table_sets[C, Rank.SEVEN] = 2
+    ctx.players[2].is_down = False
+    assert not ctx.is_stalemate()
+
+
+def test_going_out_is_never_a_stalemate_even_if_it_closes_the_table():
+    ctx = nearly_closed_table()
+    ctx.table_sets[C, Rank.SEVEN] = 2
+    ctx.players[1].receive_cards([Card(S, K)])  # player 0 has no cards: they went out
+    ctx.calculate_scores()
+    assert ctx.last_round_result == 'out'
+    assert ctx.players[1].score == 10
+
+
+def rig_nearly_closed_table_turn(ctx):
+    """The active player holds the last placeable card (♣7) and a King; others hold a King."""
+    for p in ctx.players:
+        p.receive_cards([Card(S, K)])
+    ctx.active_player.receive_cards([Card(C, Rank.SEVEN)])
+    ctx.deck[:] = [Card(D, Q), Card(D, Q)]  # the active player draws a Queen (not placeable)
+
+
+@pytest.mark.parametrize("engine_cls", ENGINES)
+def test_stalemate_ends_the_round_at_once_with_no_scores(engine_cls):
+    ctx, engine = start_first_turn(engine_cls)
+    closed = nearly_closed_table()
+    ctx.table_sets, ctx.table_runs, ctx.runs_on_table = (
+        closed.table_sets, closed.table_runs, closed.runs_on_table)
+    for p in ctx.players:
+        p.hand_list.clear()
+        p.private_hand.fill(0)
+        p.is_down = True
+    rig_nearly_closed_table_turn(ctx)
+
+    engine.resolve_pickup(0)  # nobody can May-I: everyone is down
+    assert engine.state_id == "table_play_phase"
+    hand = ctx.active_player.hand_list
+    engine.perform_table_play(next(i for i, c in enumerate(hand) if int(c.rank) == Rank.SEVEN),
+                              ON_SET)
+
+    assert ctx.last_round_result == 'stalemate'
+    assert ctx.current_round_idx == 1
+    assert [p.score for p in ctx.players] == [0] * 4
+
+
+# ---------------------------------------------------------------------------
+# Round cap (engine safety net, not a rule)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("engine_cls", ENGINES)
+def test_round_cap_ends_the_round_after_max_turns_circuits(engine_cls):
+    from agents import HeuristicAgent
+    from evaluate_arena import apply_engine_action
+
+    ctx, engine = start_first_turn(engine_cls)
+    ctx.config.max_turns = 1
+    agents = [HeuristicAgent(random_seed=i) for i in range(4)]
+    while ctx.current_round_idx == 0:
+        state = engine.state_id
+        if state == "start_turn":
+            engine.enter_pickup()
+            continue
+        idx = ctx.may_i_target_idx if state == "may_i_decision" else ctx.active_player_idx
+        action = agents[idx].select_action(state, ctx, idx, ctx.get_action_mask(idx, state))
+        apply_engine_action(engine, ctx, state, idx, action, agents[idx])
+
+    assert ctx.last_round_result == 'cap'
+    assert all(p.score > 0 for p in ctx.players)  # scored normally
