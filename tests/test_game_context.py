@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from actions import PickDiscard
 from cards import Card, Rank, Suit
 from config import JoeConfig
 from game_context import GameContext
@@ -98,7 +99,7 @@ class TestGameContextIntegrity(unittest.TestCase):
         self.ctx.execute_pickup_discard()  # takes 4♠, exposing 3♠
 
         self.assertEqual(self.ctx.dead_cards[Suit.SPADES, Rank.THREE], 1)
-        self.assertFalse(self.ctx.get_action_mask(1, 'pickup_decision')[1],
+        self.assertNotIn(PickDiscard(), self.ctx.legal_actions(1, 'pickup_decision'),
                          "The exposed card must not be offered for pickup")
         verify_mass_integrity(self, self.ctx)
 

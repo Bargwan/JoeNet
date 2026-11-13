@@ -1,5 +1,7 @@
 import unittest
 
+from actions import CallMayI, PickStock
+
 from game_context import GameContext
 from config import JoeConfig
 
@@ -71,9 +73,9 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 self.assertEqual(len(ctx.discard_pile), 1)
                 self.assertEqual(len(ctx.players[target].hand_list), 11)
 
-                # ACT: Active Player (1) picks from the STOCK (Action 0)
+                # ACT: The active player picks from the stock
                 # This leaves the top discard available, triggering the May-I queue
-                engine.resolve_pickup(0)
+                engine.resolve_pickup(PickStock())
 
                 # ASSERT: Engine halts at May-I Decision
                 self.assertEqual(self.get_state_id(engine), 'may_i_decision')
@@ -84,8 +86,8 @@ class TestEngineParityAndBugs(unittest.TestCase):
                 self.assertNotEqual(ctx.may_i_target_idx, ctx.active_player_idx,
                                     "Target CANNOT be the active player")
 
-                # ACT: The target calls the May-I (action 2)
-                engine.resolve_may_i(2)
+                # ACT: The target calls the May-I
+                engine.resolve_may_i(CallMayI())
 
                 # ASSERT: Data movement
                 self.assertEqual(len(ctx.discard_pile), 0,

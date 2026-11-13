@@ -7,6 +7,7 @@ import logging
 
 from statemachine import State, StateMachine
 
+from actions import CallMayI, GoDown, Pass, PickDiscard, PickStock, Wait
 from engine_driver import EngineDriver
 
 logger = logging.getLogger(__name__)
@@ -135,23 +136,23 @@ class JoeEngine(EngineDriver, StateMachine):
     # 3. GUARDS (Conditionals)
     # ========================================================================
 
-    def action_is_stock(self, action: int):
-        return action == 0  # PICK_STOCK
+    def action_is_stock(self, action):
+        return isinstance(action, PickStock)
 
-    def action_is_discard(self, action: int):
-        return action == 1  # PICK_DISCARD
+    def action_is_discard(self, action):
+        return isinstance(action, PickDiscard)
 
-    def action_is_call(self, action: int):
-        return action == 2  # CALL_MAY_I
+    def action_is_call(self, action):
+        return isinstance(action, CallMayI)
 
-    def action_is_pass(self, action: int):
-        return action == 3  # PASS
+    def action_is_pass(self, action):
+        return isinstance(action, Pass)
 
-    def action_is_go_down(self, action: int):
-        return action == 4  # GO_DOWN
+    def action_is_go_down(self, action):
+        return isinstance(action, GoDown)
 
-    def action_is_wait(self, action: int):
-        return action == 5  # WAIT
+    def action_is_wait(self, action):
+        return isinstance(action, Wait)
 
     def is_already_down(self):
         return self.ctx.active_player.is_down
@@ -206,10 +207,10 @@ class JoeEngine(EngineDriver, StateMachine):
         logger.debug(
             f"--- START TURN: Player {self.ctx.active_player_idx} (Circuit {self.ctx.current_circuit}, Turn {self.ctx.total_actions}) ---")
 
-    def before_resolve_pickup(self, action: int):
-        if action == 1:  # PICK_DISCARD
+    def before_resolve_pickup(self, action):
+        if isinstance(action, PickDiscard):
             self.ctx.execute_pickup_discard()
-        elif action == 0:  # PICK_STOCK
+        elif isinstance(action, PickStock):
             self.ctx.choose_stock()
 
     def on_enter_processing_pickup(self):
@@ -225,16 +226,16 @@ class JoeEngine(EngineDriver, StateMachine):
     def before_skip_ineligible_target(self):
         self.ctx.advance_may_i_target()
 
-    def before_resolve_may_i(self, action: int):
-        if action == 3:  # PASS
+    def before_resolve_may_i(self, action):
+        if isinstance(action, Pass):
             self.ctx.advance_may_i_target()
-        elif action == 2:  # CALL_MAY_I
+        elif isinstance(action, CallMayI):
             self.ctx.execute_may_i_call()
 
-    def before_resolve_go_down(self, action: int, melds=None):
+    def before_resolve_go_down(self, action):
         # Lay the chosen melds first: an invalid choice raises before the state changes.
-        if action == 4:  # GO_DOWN
-            self.ctx.go_down(self.ctx.active_player_idx, melds)
+        if isinstance(action, GoDown):
+            self.ctx.go_down(self.ctx.active_player_idx, list(action.melds))
 
     def on_enter_going_down(self):
         self.commit_melds()

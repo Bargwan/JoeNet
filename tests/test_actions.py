@@ -1,8 +1,4 @@
 """Tests for the action types (actions.py) and GameContext.legal_actions()."""
-import random
-from collections import Counter
-
-import numpy as np
 import pytest
 
 from actions import (
@@ -17,60 +13,10 @@ from actions import (
     Place,
     Wait,
 )
-from agents import HeuristicAgent
 from cards import Card, Rank, Suit
-from fast_engine import JoeEngine
-from game_context import (
-    CALL_MAY_I,
-    END_TABLE_PLAY,
-    GO_DOWN,
-    PASS,
-    PICK_DISCARD,
-    PICK_STOCK,
-    WAIT,
-    GameContext,
-    discard_action,
-    place_action,
-)
+from game_context import GameContext
 
 S, H, C, D = Suit.SPADES, Suit.HEARTS, Suit.CLUBS, Suit.DIAMONDS
-
-
-def action_number(action, state_id):
-    """The mask number the old numbered scheme gives an action."""
-    if isinstance(action, Place):
-        return place_action(action.suit, action.rank, action.destination)
-    if isinstance(action, Discard):
-        return discard_action(action.suit, action.rank)
-    if isinstance(action, (Wait, EndTablePlay)):
-        return WAIT if state_id == 'go_down_decision' else END_TABLE_PLAY
-    return {PickStock: PICK_STOCK, PickDiscard: PICK_DISCARD, CallMayI: CALL_MAY_I,
-            Pass: PASS, GoDown: GO_DOWN}[type(action)]
-
-
-@pytest.mark.parametrize("num_players, seed", [(4, 0), (3, 2)])
-def test_legal_actions_match_the_action_mask_throughout_a_game(num_players, seed):
-    """At every decision of full games, legal_actions allows exactly what the mask allows."""
-    random.seed(seed)
-    ctx = GameContext(num_players=num_players)
-    engine = JoeEngine(ctx)
-    agents = [HeuristicAgent(random_seed=i) for i in range(num_players)]
-    checked = Counter()
-
-    engine.advance()
-    while (decision := engine.decider()) is not None:
-        state, idx = decision
-
-        mask = ctx.get_action_mask(idx, state)
-        legal = ctx.legal_actions(idx, state)
-        assert {action_number(a, state) for a in legal} == set(np.flatnonzero(mask)), state
-        assert len(legal) == len(set(legal)), f"duplicate legal actions in {state}"
-        checked[state] += 1
-
-        engine.apply(agents[idx].select_action(state, ctx, idx, legal))
-
-    assert set(checked) == {'pickup_decision', 'may_i_decision', 'go_down_decision',
-                            'table_play_phase', 'discard_phase'}
 
 
 def ctx_with_hand(cards, round_idx=0):
@@ -81,6 +27,22 @@ def ctx_with_hand(cards, round_idx=0):
     player.private_hand.fill(0)
     player.receive_cards(cards)
     return ctx
+
+
+def test_pickup_offers_the_stock_and_an_available_discard():
+    ctx = GameContext(num_players=4)
+    assert ctx.legal_actions(0, 'pickup_decision') == [PickStock()]  # empty discard pile
+    ctx.discard_pile.append(Card(S, Rank.ACE))
+    assert ctx.legal_actions(0, 'pickup_decision') == [PickStock(), PickDiscard()]
+
+
+def test_may_i_offers_call_or_pass():
+    assert GameContext().legal_actions(1, 'may_i_decision') == [CallMayI(), Pass()]
+
+
+def test_discard_offers_only_cards_in_hand():
+    ctx = ctx_with_hand([Card(H, Rank.TWO), Card(C, Rank.KING)])
+    assert ctx.legal_actions(0, 'discard_phase') == [Discard(H, Rank.TWO), Discard(C, Rank.KING)]
 
 
 def test_each_card_is_listed_once_however_many_copies_are_held():
@@ -98,6 +60,11 @@ def test_go_down_lists_each_way_to_go_down_plus_wait():
         (('set', Rank.SEVEN), ('set', Rank.QUEEN)),
         (('set', Rank.NINE), ('set', Rank.QUEEN)),
     ])
+
+
+def test_go_down_offers_only_wait_without_the_objective():
+    ctx = ctx_with_hand([Card(S, Rank.SEVEN), Card(H, Rank.SEVEN), Card(D, Rank.NINE)])
+    assert ctx.legal_actions(0, 'go_down_decision') == [Wait()]
 
 
 def test_table_play_lists_every_destination_for_each_key_card():

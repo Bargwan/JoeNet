@@ -22,9 +22,6 @@ from actions import (
     Wait,
 )
 
-# Engine action numbers for the transitions that still take them
-_PICK_STOCK, _PICK_DISCARD, _CALL_MAY_I, _PASS, _GO_DOWN, _WAIT = range(6)
-
 DECISION_STATES = ('pickup_decision', 'may_i_decision', 'go_down_decision',
                    'table_play_phase', 'discard_phase')
 
@@ -71,18 +68,12 @@ class EngineDriver:
         if action not in self.ctx.legal_actions(player_idx, state_id):
             raise ValueError(f"{action} is not legal in {state_id} for player {player_idx}.")
 
-        if isinstance(action, PickStock):
-            self.resolve_pickup(_PICK_STOCK)
-        elif isinstance(action, PickDiscard):
-            self.resolve_pickup(_PICK_DISCARD)
-        elif isinstance(action, CallMayI):
-            self.resolve_may_i(_CALL_MAY_I)
-        elif isinstance(action, Pass):
-            self.resolve_may_i(_PASS)
-        elif isinstance(action, GoDown):
-            self.resolve_go_down(_GO_DOWN, list(action.melds))
-        elif isinstance(action, Wait):
-            self.resolve_go_down(_WAIT)
+        if isinstance(action, (PickStock, PickDiscard)):
+            self.resolve_pickup(action)
+        elif isinstance(action, (CallMayI, Pass)):
+            self.resolve_may_i(action)
+        elif isinstance(action, (GoDown, Wait)):
+            self.resolve_go_down(action)
         elif isinstance(action, Place):
             self.perform_table_play(self._hand_index(player_idx, action), action.destination)
         elif isinstance(action, EndTablePlay):

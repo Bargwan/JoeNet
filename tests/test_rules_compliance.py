@@ -2,7 +2,7 @@
 Rules-compliance tests: each test states a rule from rules.md and checks the
 engine obeys it.
 
-Most tests use only public behaviour (going down, the table-play action mask,
+Most tests use only public behaviour (going down, the legal actions,
 engine transitions, card movement) rather than the internal table
 representation, so they keep working if that representation changes. The
 stalemate tests build closed tables directly, as that is far shorter.
@@ -18,15 +18,8 @@ import pytest
 from cards import Card, Rank, Suit
 from engine import JoeEngine as SlowEngine
 from fast_engine import JoeEngine as FastEngine
-from game_context import (
-    GO_DOWN,
-    ON_SET,
-    RUN_HIGH_END,
-    RUN_LOW_END,
-    GameContext,
-    TableRun,
-    place_action,
-)
+from actions import CallMayI, Destination, Discard, GoDown, Pass, PickStock, Place, Wait
+from game_context import GameContext, TableRun
 from tests.test_utils import verify_mass_integrity
 
 ENGINES = [pytest.param(FastEngine, id="fast_engine"), pytest.param(SlowEngine, id="engine")]
@@ -68,13 +61,13 @@ def table_with(melds_hand, round_idx):
 
 
 def offered_destinations(ctx, card, player_idx=0):
-    """The destinations (ON_SET, RUN_LOW_END, RUN_HIGH_END) the engine offers for `card`."""
+    """The destinations the engine offers for `card` (as a legal Place action)."""
     player = ctx.players[player_idx]
     player.receive_cards([card])
-    mask = ctx.get_action_mask(player_idx, "table_play_phase")
+    legal = ctx.legal_actions(player_idx, "table_play_phase")
     player.discard(int(card.suit), int(card.rank))
-    return {d for d in (ON_SET, RUN_LOW_END, RUN_HIGH_END)
-            if mask[place_action(card.suit, card.rank, d)]}
+    return {a.destination for a in legal
+            if isinstance(a, Place) and (a.suit, a.rank) == (card.suit, card.rank)}
 
 
 def can_place(ctx, card, player_idx=0):
@@ -188,18 +181,18 @@ def table_with_7s_and_spade_run_3_to_6():
 
 def test_card_fitting_a_set_and_a_run_offers_both():
     ctx = table_with_7s_and_spade_run_3_to_6()
-    assert offered_destinations(ctx, Card(S, Rank.SEVEN)) == {ON_SET, RUN_HIGH_END}
+    assert offered_destinations(ctx, Card(S, Rank.SEVEN)) == {Destination.ON_SET, Destination.RUN_HIGH_END}
 
 
 def test_placing_on_the_run_extends_the_run():
     ctx = table_with_7s_and_spade_run_3_to_6()
-    place(ctx, Card(S, Rank.SEVEN), RUN_HIGH_END)
+    place(ctx, Card(S, Rank.SEVEN), Destination.RUN_HIGH_END)
     assert can_place(ctx, Card(S, Rank.EIGHT))
 
 
 def test_placing_on_the_set_leaves_the_run_unchanged():
     ctx = table_with_7s_and_spade_run_3_to_6()
-    place(ctx, Card(S, Rank.SEVEN), ON_SET)
+    place(ctx, Card(S, Rank.SEVEN), Destination.ON_SET)
     assert not can_place(ctx, Card(S, Rank.EIGHT))
     assert can_place(ctx, Card(S, Rank.SEVEN))  # the run's high end is still open
 
@@ -211,19 +204,19 @@ def table_with_gap_between_runs():
 
 def test_card_in_a_one_card_gap_offers_both_run_ends():
     ctx = table_with_gap_between_runs()
-    assert offered_destinations(ctx, Card(S, Rank.SIX)) == {RUN_LOW_END, RUN_HIGH_END}
+    assert offered_destinations(ctx, Card(S, Rank.SIX)) == {Destination.RUN_LOW_END, Destination.RUN_HIGH_END}
 
 
 def test_gap_card_on_the_lower_run_opens_the_seven():
     ctx = table_with_gap_between_runs()
-    place(ctx, Card(S, Rank.SIX), RUN_HIGH_END)  # ♠2-6
+    place(ctx, Card(S, Rank.SIX), Destination.RUN_HIGH_END)  # ♠2-6
     assert can_place(ctx, Card(S, Rank.SEVEN))
     assert not can_place(ctx, Card(S, Rank.FIVE))
 
 
 def test_gap_card_on_the_upper_run_opens_the_five():
     ctx = table_with_gap_between_runs()
-    place(ctx, Card(S, Rank.SIX), RUN_LOW_END)  # ♠6-10
+    place(ctx, Card(S, Rank.SIX), Destination.RUN_LOW_END)  # ♠6-10
     assert can_place(ctx, Card(S, Rank.FIVE))
     assert not can_place(ctx, Card(S, Rank.SEVEN))
 
@@ -231,13 +224,13 @@ def test_gap_card_on_the_upper_run_opens_the_five():
 def test_ace_offers_whichever_run_end_it_fits():
     # ♠A-2-3-4 and ♠10-J-Q-K: the second Ace only fits above the King.
     ctx = table_with(run(S, A, *ranks(2, 4)) + run(S, *ranks(10, 10), J, Q, K), round_idx=2)
-    assert offered_destinations(ctx, Card(S, A)) == {RUN_HIGH_END}
+    assert offered_destinations(ctx, Card(S, A)) == {Destination.RUN_HIGH_END}
 
 
 def test_placing_at_an_illegal_destination_is_refused():
     ctx = table_with_spade_run_3_to_6()
     with pytest.raises(ValueError):
-        place(ctx, Card(S, Rank.SEVEN), RUN_LOW_END)
+        place(ctx, Card(S, Rank.SEVEN), Destination.RUN_LOW_END)
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +315,7 @@ def reach_go_down_decision(engine_cls):
     player.hand_list.clear()
     player.private_hand.fill(0)
     player.receive_cards(SEVENS_NINES_QUEENS + [Card(C, Rank.TWO), Card(C, Rank.FIVE)])
-    engine.resolve_pickup(0)
+    engine.apply(PickStock())
     may_i_offers(ctx, engine)
     assert engine.state_id == "go_down_decision"
     return ctx, engine
@@ -331,7 +324,7 @@ def reach_go_down_decision(engine_cls):
 @pytest.mark.parametrize("engine_cls", ENGINES)
 def test_engine_goes_down_with_the_chosen_melds(engine_cls):
     ctx, engine = reach_go_down_decision(engine_cls)
-    engine.resolve_go_down(GO_DOWN, [('set', Rank.SEVEN), ('set', Q)])
+    engine.apply(GoDown((('set', Rank.SEVEN), ('set', Q))))
 
     assert engine.state_id == "table_play_phase"
     assert ctx.active_player.is_down
@@ -344,7 +337,7 @@ def test_engine_goes_down_with_the_chosen_melds(engine_cls):
 def test_engine_refuses_an_invalid_go_down_choice(engine_cls):
     ctx, engine = reach_go_down_decision(engine_cls)
     with pytest.raises(ValueError):
-        engine.resolve_go_down(GO_DOWN, [('set', K), ('set', Q)])
+        engine.apply(GoDown((('set', K), ('set', Q))))
     assert not ctx.active_player.is_down
 
 
@@ -392,9 +385,8 @@ class _Asserter:
 def test_player_after_dealer_takes_first_turn(engine_cls):
     ctx = GameContext(num_players=4)
     engine = engine_cls(ctx)
-    engine.start_game()
-    engine.deal_cards()
-    assert ctx.active_player_idx == (ctx.dealer_idx + 1) % 4
+    engine.advance()
+    assert engine.decider() == ('pickup_decision', (ctx.dealer_idx + 1) % 4)
 
 
 @pytest.mark.parametrize("engine_cls", ENGINES)
@@ -416,9 +408,7 @@ def start_first_turn(engine_cls, num_players=4, seed=1234):
     random.seed(seed)
     ctx = GameContext(num_players=num_players)
     engine = engine_cls(ctx)
-    engine.start_game()
-    engine.deal_cards()
-    engine.enter_pickup()
+    engine.advance()
     return ctx, engine
 
 
@@ -427,7 +417,7 @@ def may_i_offers(ctx, engine):
     offered = []
     while engine.state_id == "may_i_decision":
         offered.append(ctx.may_i_target_idx)
-        engine.resolve_may_i(3)  # PASS
+        engine.apply(Pass())
     return offered
 
 
@@ -437,7 +427,7 @@ def test_opening_upcard_is_offered_to_everyone_but_the_active_player(engine_cls,
     ctx, engine = start_first_turn(engine_cls, num_players)
     active = ctx.active_player_idx
 
-    engine.resolve_pickup(0)  # PICK_STOCK
+    engine.apply(PickStock())
 
     expected = [(active + i) % num_players for i in range(1, num_players)]
     assert may_i_offers(ctx, engine) == expected
@@ -448,15 +438,15 @@ def test_may_i_is_not_offered_to_the_discarder(engine_cls):
     ctx, engine = start_first_turn(engine_cls)
     # Play out the first turn so the next top discard has a known discarder.
     first = ctx.active_player_idx
-    engine.resolve_pickup(0)
+    engine.apply(PickStock())
     may_i_offers(ctx, engine)
-    while engine.state_id != "discard_phase":
-        engine.resolve_go_down(5)  # WAIT
-    engine.perform_discard(0)
-    engine.enter_pickup()
+    if engine.state_id == "go_down_decision":
+        engine.apply(Wait())
+    card = ctx.active_player.hand_list[0]
+    engine.apply(Discard(card.suit, card.rank))
     assert ctx.active_player_idx == (first + 1) % 4
 
-    engine.resolve_pickup(0)
+    engine.apply(PickStock())
 
     offered = may_i_offers(ctx, engine)
     assert first not in offered
@@ -471,7 +461,7 @@ def test_may_i_is_not_offered_to_players_who_are_down_or_out_of_may_is(engine_cl
     ctx.players[down].is_down = True
     ctx.players[used_up].may_is_used = 3
 
-    engine.resolve_pickup(0)
+    engine.apply(PickStock())
 
     offered = may_i_offers(ctx, engine)
     assert down not in offered
@@ -485,8 +475,8 @@ def test_may_i_caller_takes_discard_plus_one_stock_card(engine_cls):
     target = ctx.discard_pile[-1]
     hand_before = list(caller.hand_list)
 
-    engine.resolve_pickup(0)
-    engine.resolve_may_i(2)  # CALL_MAY_I
+    engine.apply(PickStock())
+    engine.apply(CallMayI())
 
     new_cards = [c for c in caller.hand_list if not any(c is b for b in hand_before)]
     assert len(new_cards) == 2
@@ -521,7 +511,7 @@ def test_stock_is_rebuilt_straight_after_the_draw_that_empties_it(engine_cls):
         if i != ctx.active_player_idx:
             p.is_down = True  # nobody can May-I
 
-    engine.resolve_pickup(0)
+    engine.apply(PickStock())
 
     assert any(c is last_stock for c in ctx.active_player.hand_list)
     assert ctx.discard_pile == [top]
@@ -537,8 +527,8 @@ def test_may_i_caller_takes_the_last_stock_card(engine_cls):
     active = ctx.active_player
     caller = ctx.players[(ctx.active_player_idx + 1) % 4]
 
-    engine.resolve_pickup(0)
-    engine.resolve_may_i(2)
+    engine.apply(PickStock())
+    engine.apply(CallMayI())
 
     assert any(x is target for x in caller.hand_list)
     assert any(x is last_stock for x in caller.hand_list)
@@ -635,11 +625,9 @@ def test_stalemate_ends_the_round_at_once_with_no_scores(engine_cls):
         p.is_down = True
     rig_nearly_closed_table_turn(ctx)
 
-    engine.resolve_pickup(0)  # nobody can May-I: everyone is down
+    engine.apply(PickStock())  # nobody can May-I: everyone is down
     assert engine.state_id == "table_play_phase"
-    hand = ctx.active_player.hand_list
-    engine.perform_table_play(next(i for i, c in enumerate(hand) if int(c.rank) == Rank.SEVEN),
-                              ON_SET)
+    engine.apply(Place(C, Rank.SEVEN, Destination.ON_SET))
 
     assert ctx.last_round_result == 'stalemate'
     assert ctx.current_round_idx == 1

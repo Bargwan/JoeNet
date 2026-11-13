@@ -1,5 +1,6 @@
 import unittest
 
+from actions import CallMayI, Destination, GoDown, Pass, PickDiscard, PickStock, Wait
 from fast_engine import JoeEngine
 from game_context import GameContext
 from tests.test_utils import verify_mass_integrity
@@ -7,14 +8,11 @@ from tests.test_utils import verify_mass_integrity
 
 class TestJoeEngine(unittest.TestCase):
     """
-    Unit tests for fast_engine.JoeEngine. Most tests "teleport" the engine into a
-    state and set up the GameContext directly, then fire one transition.
-
-    Action numbers (see the constants in game_context):
-        0 = PICK_STOCK, 1 = PICK_DISCARD, 2 = CALL_MAY_I, 3 = PASS, 4 = GO_DOWN,
-        5 = WAIT (go_down_decision) or END_TABLE_PLAY (table_play_phase).
-    Discard and table-play transitions take a hand index (and, for table play,
-    a destination), not an action number.
+    Unit tests for fast_engine.JoeEngine's transitions. Most tests "teleport" the
+    engine into a state and set up the GameContext directly, then fire one
+    transition. Pickup, May-I and go-down transitions take action objects;
+    discard and table-play transitions take a hand index (and, for table play,
+    a destination). Games are normally driven through engine.apply() instead.
     """
 
     def setUp(self):
@@ -43,7 +41,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 4. Proceed with the flow
         self.engine.enter_pickup()
-        self.engine.resolve_pickup(1)
+        self.engine.resolve_pickup(PickDiscard())
 
         # 5. ASSERT: Should now land on discard_phase every time
         self.assertEqual(
@@ -93,7 +91,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_pickup_discard_logic(self):
         """
-        Intent: Verify PICK_DISCARD (action 1) moves the top discard into the hand.
+        Intent: Verify PickDiscard moves the top discard into the hand.
         """
         # 1. Teleport the Data Layer
         self.ctx.active_player_idx = 0
@@ -117,7 +115,7 @@ class TestJoeEngine(unittest.TestCase):
         self.assertEqual(self.engine.state_id, "pickup_decision")
 
         # 3. ACT: Fire the transition
-        self.engine.resolve_pickup(1)
+        self.engine.resolve_pickup(PickDiscard())
 
         # 4. ASSERT: State Routing
         self.assertEqual(self.engine.state_id, "discard_phase")
@@ -131,7 +129,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_pickup_stock_logic(self):
         """
-        Intent: Verify that choosing PICK_STOCK moves the top card of the deck
+        Intent: Verify that choosing PickStock moves the top card of the deck
         into the active player's hand, after any May-I is resolved (rules.md Section 5).
         """
         # 1. Teleport the Data Layer
@@ -149,7 +147,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.pickup_decision
 
         # 3. ACT: Fire the transition
-        self.engine.resolve_pickup(0)
+        self.engine.resolve_pickup(PickStock())
 
         # 4. ASSERT: The May-I is offered before the active player draws
         self.assertEqual(self.engine.state_id, "may_i_decision")
@@ -158,7 +156,7 @@ class TestJoeEngine(unittest.TestCase):
 
         # 5. Everyone passes; then the active player draws
         while self.engine.state_id == "may_i_decision":
-            self.engine.resolve_may_i(3)
+            self.engine.resolve_may_i(Pass())
         self.assertEqual(len(self.ctx.deck), initial_deck_size - 1)
         self.assertEqual(len(self.ctx.active_player.hand_list), 1)
 
@@ -192,7 +190,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.pickup_decision
 
         # 3. ACT: Active Player (0) touches the stock
-        self.engine.resolve_pickup(0)
+        self.engine.resolve_pickup(PickStock())
 
         # 4. ASSERT: State Routing
         # The engine should pass through the automatic 'may_i_check' state,
@@ -238,7 +236,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.may_i_decision
 
         # 3. ACT: Interrupter calls the May-I
-        self.engine.resolve_may_i(2)
+        self.engine.resolve_may_i(CallMayI())
 
         # 4. ASSERT: State Routing
         self.assertEqual(self.engine.state_id, "discard_phase")
@@ -334,7 +332,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_go_down_decision_action_go_down(self):
         """
-        Intent: Verify that choosing GO_DOWN lays the meld cards on the table,
+        Intent: Verify that choosing GoDown lays the meld cards on the table,
         marks the player as down, and lands on table_play_phase.
         """
         from cards import Card, Rank, Suit
@@ -359,8 +357,8 @@ class TestJoeEngine(unittest.TestCase):
         # 2. Teleport to go_down_decision
         self.engine.current_state = self.engine.go_down_decision
 
-        # 3. ACT: Fire the GO_DOWN decision
-        self.engine.resolve_go_down(4)
+        # 3. ACT: Fire the GoDown decision
+        self.engine.resolve_go_down(GoDown(self.ctx.find_melds(player.private_hand, 2, 0)))
 
         # 4. ASSERT: State Routing
         self.assertEqual(
@@ -677,7 +675,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.may_i_decision
 
         # 3. ACT: Interrupter 1 passes
-        self.engine.resolve_may_i(3)
+        self.engine.resolve_may_i(Pass())
 
         # 4. ASSERT: State Routing and Pointer
         # The engine should loop back to may_i_check, automatically evaluate
@@ -695,7 +693,7 @@ class TestJoeEngine(unittest.TestCase):
 
     def test_go_down_decision_action_wait(self):
         """
-        Intent: Verify that choosing WAIT skips the placement phases, leaves the
+        Intent: Verify that choosing Wait skips the placement phases, leaves the
         cards in the player's hand, and lands on discard_phase.
         """
         from cards import Card, Rank, Suit
@@ -719,8 +717,8 @@ class TestJoeEngine(unittest.TestCase):
         # 2. Teleport to go_down_decision
         self.engine.current_state = self.engine.go_down_decision
 
-        # 3. ACT: Fire the WAIT decision
-        self.engine.resolve_go_down(5)
+        # 3. ACT: Fire the Wait decision
+        self.engine.resolve_go_down(Wait())
 
         # 4. ASSERT: State Routing
         self.assertEqual(
@@ -843,21 +841,21 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.pickup_decision
 
         # 3. ACT: Active player (1) picks from stock, starting the May-I loop.
-        self.engine.resolve_pickup(0)
+        self.engine.resolve_pickup(PickStock())
 
         # Engine should ask Player 2 first (Active + 1).
         self.assertEqual(self.engine.state_id, "may_i_decision")
         self.assertEqual(self.ctx.may_i_target_idx, 2)
 
         # Player 2 passes.
-        self.engine.resolve_may_i(3)
+        self.engine.resolve_may_i(Pass())
 
         # Engine should ask Player 3 next.
         self.assertEqual(self.engine.state_id, "may_i_decision")
         self.assertEqual(self.ctx.may_i_target_idx, 3)
 
         # 4. ACT: Player 3 passes.
-        self.engine.resolve_may_i(3)
+        self.engine.resolve_may_i(Pass())
 
         # 5. ASSERT: Player 0 (the discarder) is skipped as ineligible, and the
         # offer ends on reaching the active player again.
@@ -890,8 +888,7 @@ class TestJoeEngine(unittest.TestCase):
         self.engine.current_state = self.engine.table_play_phase
 
         # ACT: Play the card at index 0 onto the set
-        from game_context import ON_SET
-        self.engine.perform_table_play(0, ON_SET)
+        self.engine.perform_table_play(0, Destination.ON_SET)
 
         # ASSERT: State should loop back automatically
         self.assertEqual(
