@@ -7,7 +7,7 @@
 * **Key Card:** A card in a player's hand that could legally extend a meld already on the table. Once it is placed on a meld it becomes part of that meld and is no longer a Key Card.
 * **Going Down:** Placing the Game Round's objective melds from your hand face-up on the table (Section 6).
 * **Going Out:** Ending your turn with no cards in your hand (Section 6).
-* **Closed Table:** No meld on the table can be extended, because every card that could extend one is already on the table in another meld. Every set holds all 8 cards of its rank, and every run end is either an Ace or both copies of the next card are on the table. With a closed table there are no Key Cards anywhere (Section 8).
+* **Closed Table:** No meld on the table can be extended, because every card that could extend one is already on the table in another meld. For every set, all 8 cards of its rank are on the table (in that set, in other sets of the same rank, or in runs), and every run end is either an Ace or both copies of the next card are on the table. With a closed table there are no Key Cards anywhere (Section 8).
 
 ## 2. Setup & The Deal
 * **Players:** 3 or 4.
@@ -74,7 +74,7 @@ The opening upcard can be May-I'd like any other discard.
 As soon as the Stock Pile becomes empty, all of the Discard Pile except its top card is shuffled to form a new Stock Pile. The top card stays face-up as the Discard Pile. The rebuild happens straight after whichever draw emptied the stock, so the stock is never empty when someone needs to draw from it. For example, if the stock holds one card when a May-I is called, the May-I caller takes that card. The stock is then rebuilt, and the active player draws from the new stock.
 
 ## 8. Stalemate
-If every player is down and the table is closed (Section 1), the Game Round ends immediately in a stalemate. A player who places their last card goes out instead: going out ends the round, so it is never a stalemate, even if that card closes the table.
+If every player is down and the table is closed (Section 1), the Game Round ends immediately in a stalemate.
 
 Every player scores **0 points** for a stalemated Game Round, whatever is left in their hand.
 

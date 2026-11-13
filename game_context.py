@@ -190,8 +190,8 @@ class GameContext:
         """
         True when no meld on the table can be extended, because every card that could
         extend one is already on the table (rules.md Section 1, "Closed Table"):
-        every set holds all 8 cards of its rank, and every run end is an Ace or both
-        copies of the next card are on the table.
+        for every set, all 8 cards of its rank are on the table (in any melds), and every
+        run end is an Ace or both copies of the next card are on the table.
         """
         for suit in range(4):
             for rank in range(13):
