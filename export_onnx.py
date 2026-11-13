@@ -1,6 +1,36 @@
 import torch
 
 
+class JoeNetDeployment(torch.nn.Module):
+    """A lightweight wrapper that strips out the Critic for high-speed inference."""
+
+    def __init__(self, base_model):
+        super().__init__()
+        self.oracle_3p = base_model.oracle_3p
+        self.oracle_4p = base_model.oracle_4p
+        self.actor = base_model.actor
+
+    def forward(self, spatial, scalar, mask):
+        # 1. Extract the 3P flag and reshape it to broadcast across the spatial dimensions
+        # Shape becomes (Batch, 1, 1, 1) so it can mask the (Batch, 3, 4, 14) Oracles
+        is_3p_mask = (scalar[:, 22] > 0.5).view(-1, 1, 1, 1)
+
+        # 2. Evaluate BOTH specialists (ONNX prefers static execution paths)
+        probs_3p = self.oracle_3p(spatial, scalar)
+        probs_3p[:, 2, :, :] = 0.0  # Maintain the absolute zero silence rule
+
+        probs_4p = self.oracle_4p(spatial, scalar)
+
+        # 3. Use an ONNX-compliant multiplexer node to choose the correct prediction
+        oracle_probs = torch.where(is_3p_mask, probs_3p, probs_4p)
+
+        # 4. Concatenate and act
+        expanded_spatial = torch.cat([spatial, oracle_probs], dim=1)
+        logits = self.actor(expanded_spatial, scalar, action_mask=mask)
+
+        return logits
+
+
 def export_joenet_to_onnx(model, save_path="joenet.onnx"):
     """
     Exports the PyTorch JoeNet model to an ONNX graph for high-speed inference.
@@ -8,22 +38,21 @@ def export_joenet_to_onnx(model, save_path="joenet.onnx"):
     # 1. Force evaluation mode (disables dropout, locks batchnorm, etc.)
     model.eval()
 
-    # 2. Create dummy inputs matching the exact tensor contracts
-    batch_size = 1
-    spatial = torch.randn(batch_size, 13, 4, 14, dtype=torch.float32)
-    scalar = torch.randn(batch_size, 28, dtype=torch.float32)
-    mask = torch.ones(batch_size, 58, dtype=torch.bool)
+    # --- NEW: Dynamically detect the model's device ---
+    device = next(model.parameters()).device
 
-    # 3. Define dynamic axes
-    # This tells ONNX that the 0th dimension (batch size) can change,
-    # allowing us to use this same file for single-agent inference or batch processing later.
+    # 2. Create dummy inputs matching the exact tensor contracts (and move them to the device)
+    batch_size = 1
+    spatial = torch.randn(batch_size, 13, 4, 14, dtype=torch.float32, device=device)
+    scalar = torch.randn(batch_size, 28, dtype=torch.float32, device=device)
+    mask = torch.ones(batch_size, 58, dtype=torch.bool, device=device)
+
+    # 3. Define dynamic axes (Removed 'value' and 'oracle')
     dynamic_axes = {
         'spatial': {0: 'batch_size'},
         'scalar': {0: 'batch_size'},
         'mask': {0: 'batch_size'},
-        'logits': {0: 'batch_size'},
-        'value': {0: 'batch_size'},
-        'oracle': {0: 'batch_size'}
+        'logits': {0: 'batch_size'}
     }
 
     # 4. Export the graph
@@ -32,10 +61,10 @@ def export_joenet_to_onnx(model, save_path="joenet.onnx"):
         (spatial, scalar, mask),
         save_path,
         export_params=True,
-        opset_version=14,  # Opset 14 is highly stable and fully supported by Godot/ORT
-        do_constant_folding=True,  # Optimizes constant math out of the graph
+        opset_version=14,
+        do_constant_folding=True,
         input_names=['spatial', 'scalar', 'mask'],
-        output_names=['logits', 'value', 'oracle'],
+        output_names=['logits'],  # <--- ONLY EXPORTING LOGITS
         dynamic_axes=dynamic_axes
     )
 
@@ -52,12 +81,17 @@ if __name__ == "__main__":
     device = torch.device("cpu")  # Exporting is usually safest on CPU
     model = JoeNet().to(device)
 
-    weights_path = "models/joenet_phase3_rl_final.pth"
-    onnx_path = "models/joenet_phase3.onnx"
+    weights_path = "models/joenet_phase2_ep7.pth"
+    onnx_path = "models/joenet_phase7.onnx"
 
     if os.path.exists(weights_path):
-        model.load_state_dict(torch.load(weights_path, map_location=device))
-        export_joenet_to_onnx(model, onnx_path)
-        print(f"-> Successfully exported Phase 3 model to: {onnx_path}")
+        model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
+
+        # --- NEW: Wrap the model for deployment ---
+        deployment_model = JoeNetDeployment(model)
+        deployment_model.eval()
+
+        export_joenet_to_onnx(deployment_model, onnx_path)
+        print(f"-> Successfully exported LEAN Phase 3 model to: {onnx_path}")
     else:
         print(f"Error: Could not find weights at {weights_path}")

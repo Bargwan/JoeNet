@@ -21,8 +21,13 @@ class RLTrainer:
         # Dynamically grab the device the model is currently sitting on
         device = next(self.model.parameters()).device
 
-        # Extract and immediately push all tensors to the correct device
-        spatial = batch_tensors['spatial'].to(device)
+        # Extract and clone spatial to prevent in-place memory mutation of the batch dictionary
+        spatial = batch_tensors['spatial'].to(device).clone()
+        presence_channels = [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+        # Out-of-place division
+        spatial[:, presence_channels, :, :] = spatial[:, presence_channels, :, :] / 2.0
+
         scalar = batch_tensors['scalar'].to(device)
         mask = batch_tensors['mask'].to(device)
         actions = batch_tensors['action'].to(device)
@@ -63,17 +68,40 @@ class RLTrainer:
 
         # Policy Gradient formula: Maximize expected reward -> Minimize -log(P(a|s)) * Advantage
         actor_loss = -(action_log_probs * advantages).mean()
-        oracle_loss = F.binary_cross_entropy(oracle_probs, oracle_truths)
+
+
+        # Calculate Oracle Loss strictly for TensorBoard monitoring
+        with torch.no_grad():
+            is_3_player = scalar[:, 22].bool()
+
+            oracle_loss_3p = 0.0
+            if is_3_player.any():
+                # --- ADJUSTED: Slice out the 3rd opponent (index 2) ---
+                adjusted_probs_3p = oracle_probs[is_3_player][:, :2, :, :]
+                adjusted_truths_3p = oracle_truths[is_3_player][:, :2, :, :]
+
+                oracle_loss_3p = F.binary_cross_entropy(
+                    adjusted_probs_3p, adjusted_truths_3p
+                ).item()
+
+            oracle_loss_4p = 0.0
+            if (~is_3_player).any():
+                oracle_loss_4p = F.binary_cross_entropy(
+                    oracle_probs[~is_3_player], oracle_truths[~is_3_player]
+                ).item()
 
         # 5. Backpropagation
+        # --- Only backpropagate Actor and Critic ---
         total_loss = actor_loss + critic_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
         self.optimizer.step()
 
         return {
             'actor_loss': actor_loss.item(),
             'critic_loss': critic_loss.item(),
-            'oracle_loss': oracle_loss.item()
+            'oracle_loss_3p': oracle_loss_3p,
+            'oracle_loss_4p': oracle_loss_4p
         }

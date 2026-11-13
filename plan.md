@@ -92,15 +92,30 @@ This document strictly dictates the step-by-step Test-Driven Development (TDD) s
 
 ---
 
-## Phase 7: Phase 3 & 4 Execution (RL Self-Play)
-*Goal: Implement TD Learning to un-learn heuristic flaws and achieve superhuman mastery, using the Arena to continuously measure growth.*
+## Phase 7: Reward Layer Refactor (Dynamic PBRS)
+*Goal: Discard abstract heuristic scoring and build a stateless EV math engine in `reward.py`, fed dynamically by tensor deserialization in `buffers.py`.*
 
-* **Step 7.1: TD Target & Rollout Buffer**
-    * [x] Build the temporary Rollout Buffer to store step-by-step `[State, Action, Reward, Next_State]` packages.
-    * [x] Implement the TD Error math calculation for batch updates.
-* **Step 7.2: Phase 3 (Exploratory Training Loop)**
-    * [x] Implement entropy injection for forced exploration.
-    * [x] Execute the reinforcement training loop using PBRS step rewards.
-* **Step 7.3: Phase 4 (Mastery Training Loop)**
+* **Step 7.1: The Dense Reward Engine (`reward.py`)**
+    * [ ] Create `StateEvaluator` class. Migrate the pure math (`_evaluate_hand_state`, `_calculate_avalanche_threat`, etc.) completely out of `agents.py`.
+    * [ ] Delete obsolete `RewardCalculator` abstract heuristic logic (Ukeire/Betaori).
+    * [ ] Retain `calculate_asymmetric_score` to anchor the terminal state.
+* **Step 7.2: Tensor Deserialization (`buffers.py`)**
+    * [ ] Build a robust helper function to map the 13-channel spatial tensor and scalar array back into a mocked `GameContext`.
+    * [ ] Ensure correct slicing (e.g., mapping Channel 1 to `ctx.table_sets`, Channels 8-11 to `ctx.player_pickup_counts`).
+* **Step 7.3: Dynamic PBRS Integration**
+    * [ ] Update the PyTorch `Dataset` to call the deserializer from `buffers.py`, passing the mocked context into the `reward.py` evaluator.
+    * [ ] Write unit tests for the $F(s,a,s') = \Phi(s') - \Phi(s)$ calculation, ensuring $\Delta EV$ accurately rewards positive hand progression and penalizes accumulating deadwood.
+
+---
+
+## Phase 8: Phase 3 & 4 Execution (RL Self-Play)
+*Goal: Implement TD Learning using the newly wired Probabilistic dense rewards.*
+
+* **Step 8.1: TD Target & Rollout Buffer Update**
+    * [ ] Update the temporary Rollout Buffer to calculate the TD Error using the injected $\Phi(s)$ and $\Phi(s')$ values from the math engine.
+* **Step 8.2: Phase 3 (Exploratory Training Loop)**
+    * [ ] Implement entropy injection for forced exploration.
+    * [ ] Execute the Actor-Critic reinforcement training loop using the new dense step rewards.
+* **Step 8.3: Phase 4 (Mastery Training Loop)**
     * [ ] Remove exploration constraints and finalize evaluation parameters.
-    * [ ] Run the final JoeNet model through the Arena to prove superhuman tournament performance.
+    * [ ] Run the final JoeNet model through the Arena to prove superhuman tournament performance against the baseline Heuristic and Probabilistic agents.

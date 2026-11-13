@@ -134,7 +134,7 @@ class TestEvaluationArena(unittest.TestCase):
             "Failed to track round win! The runner is likely still falling for the transient hand-size trap."
         )
         self.assertEqual(
-            results['strategic_detonations'], 1.0,
+            results['down_and_out_wins'], 1.0,
             "Failed to track strategic detonation!"
         )
 

@@ -21,37 +21,41 @@ class FastState:
     def __repr__(self):
         return f"State({self.id})"
 
-
 class JoeEngine:
     """
     A lightning-fast, hardcoded state machine replacement for the 'Joe' card game.
-    Strips out all the heavy reflection and validation of the python-statemachine library
-    while maintaining the exact same public API, routing logic, and test compatibility.
     """
-    # __slots__ prevents Python from creating a dynamic __dict__, saving massive
-    # amounts of RAM and making deepcopying virtually instantaneous.
     __slots__ = ['ctx', 'current_state']
 
-    # Pre-allocate states once in memory to avoid instantiation overhead during play
-    setup = FastState('setup')
-    dealing = FastState('dealing')
-    start_turn = FastState('start_turn')
-    pickup_decision = FastState('pickup_decision')
-    processing_pickup = FastState('processing_pickup')
-    may_i_check = FastState('may_i_check')
-    may_i_decision = FastState('may_i_decision')
-    go_down_decision = FastState('go_down_decision')
-    going_down = FastState('going_down')
-    table_play_phase = FastState('table_play_phase')
-    processing_table_play = FastState('processing_table_play')
-    discard_phase = FastState('discard_phase')
-    processing_discard = FastState('processing_discard')
-    round_end = FastState('round_end')
-    game_over = FastState('game_over')
+    # Refactored to match original engine.py Title Case strings
+    setup = FastState('Setup')
+    dealing = FastState('Dealing')
+    start_turn = FastState('Start Turn')
+    pickup_decision = FastState('Pickup Decision')
+    processing_pickup = FastState('Processing Pickup')
+    may_i_check = FastState('May-I Check')
+    may_i_decision = FastState('May-I Decision')
+    go_down_decision = FastState('Go Down Decision')
+    going_down = FastState('Going Down')
+    table_play_phase = FastState('Table Play Phase')
+    processing_table_play = FastState('Processing Table Play')
+    discard_phase = FastState('Discard Phase')
+    processing_discard = FastState('Processing Discard')
+    round_end = FastState('Round End')
+    game_over = FastState('Game Over')
 
     def __init__(self, context):
         self.ctx = context
         self.current_state = self.setup
+
+    @property
+    def state_id(self) -> str:
+        """
+        Universal normalizer for the fast engine. Guarantees it reports
+        its current state as a standard snake_case string, perfectly
+        mirroring the behavior of the python-statemachine engine.
+        """
+        return self.current_state.id.lower().replace(' ', '_').replace('-', '_')
 
     # ========================================================================
     # 1. TRANSITIONS (Replaces python-statemachine dispatching)

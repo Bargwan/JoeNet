@@ -71,6 +71,7 @@ class TestActionMasking(unittest.TestCase):
         Verify cards in hand are legal to play, AND End_Table_Play (5) is legal.
         """
         self.player.receive_cards([Card(Suit.DIAMONDS, Rank.FIVE)])  # Offset: 6 + (3*13) + 4 = 49
+        self.ctx.table_sets[Suit.HEARTS, Rank.FIVE] = 1
 
         mask = self.ctx.get_action_mask(self.player_idx, state_id='table_play_phase')
 

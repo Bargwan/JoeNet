@@ -13,17 +13,17 @@ class TestEngineParityAndBugs(unittest.TestCase):
     def get_state_id(self, engine):
         """
         Helper to normalize the state ID across both engine types.
-        python-statemachine and FastState format IDs slightly differently.
+        Updated to handle hyphens to match the engine-level standardization.
         """
         # Handle python-statemachine's new API (SlowEngine)
         if hasattr(engine, 'configuration'):
-            # 'configuration' returns a list of currently active states
             raw_id = engine.configuration[0].id
         else:
             # Our custom FastEngine
             raw_id = engine.current_state.id
 
-        return str(raw_id).lower().replace(' ', '_')
+        # --- THE FIX: Standardize hyphens AND spaces ---
+        return str(raw_id).lower().replace(' ', '_').replace('-', '_')
 
     def test_auto_stepper_progression(self):
         """

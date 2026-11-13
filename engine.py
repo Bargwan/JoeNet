@@ -14,6 +14,15 @@ class JoeEngine(StateMachine):
         self.ctx = context
         super().__init__()
 
+    @property
+    def state_id(self) -> str:
+        """
+        Universal normalizer. Guarantees the engine always reports its
+        current state as a standard snake_case string, regardless of
+        the underlying python-statemachine version or human-readable name.
+        """
+        return self.current_state.name.lower().replace(' ', '_').replace('-', '_')
+
     # ========================================================================
     # 1. STATES
     # ========================================================================

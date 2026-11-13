@@ -35,7 +35,7 @@ class NeuralAgent(Agent):
         with torch.no_grad():
             # Forward pass through the Actor-Critic multi-head architecture
             # We unpack the tuple and ignore the Critic (EV) and Oracle for action selection
-            logits, ev, oracle_probs = self.model(spatial, scalar, action_mask=mask)
+            logits, ev, oracle_probs = self.model(spatial, scalar, mask)
 
         # 5. Extract the best move strictly from the masked Actor logits
         # Since JoeNet naturally squashes masked illegal moves to -1e9, argmax is perfectly safe

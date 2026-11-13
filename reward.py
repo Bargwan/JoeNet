@@ -1,121 +1,223 @@
 import numpy as np
+from typing import List
 from game_context import GameContext
+from cards import Card
 
 
 class RewardCalculator:
     """
-    Handles the deterministic mathematical logic required for Potential-Based Reward Shaping (PBRS)
-    and Asymmetric Terminal Scoring to resolve the Credit Assignment Problem.
+    Mechanical helper for identifying valid meld combinations.
+    (All PBRS and Zero-Sum math is now handled natively in train_rl.py)
     """
 
     def __init__(self, ctx: GameContext):
         self.ctx = ctx
+        self.win_hunger = 40.0
 
-    def calculate_card_outs(self, suit: int, rank: int, player_idx: int,
-                            oracle_probs: np.ndarray) -> float:
+    def calculate_state_potential(self, player_idx: int, oracle_probs: np.ndarray = None) -> float:
         """
-        Step 3.1: Combinatorial Outs Calculator (Ukeire)
-        Calculates how many copies of a specific card are available in the unknown universe,
-        discounting cards the Oracle predicts opponents are holding.
+        The Vision-Guided Sprinter Potential Function.
+        Uses public hand sizes for Threat, and hidden Oracle probabilities for Availability.
         """
-        # Joe uses a double deck, meaning exactly 2 of every card exist in the universe
-        total_in_universe = 2.0
+        raw_distance = self.calculate_distance_to_win(player_idx)
+        raw_deadwood = self._calculate_active_deadwood(player_idx)
+        current_turn = self.ctx.current_circuit
 
-        # 1. Deduct Known Absolute Truths
-        known_count = 0.0
+        # ==========================================
+        # 1. ORACLE THREAT (Public Info)
+        # ==========================================
+        # Threat is determined by how close opponents are to going out.
+        # We use public hand sizes: < 8 cards = rising threat, <= 2 cards = max panic.
+        opp_hand_sizes = [
+            len(p.hand_list) for i, p in enumerate(self.ctx.players) if i != player_idx
+        ]
+        min_opp_cards = min(opp_hand_sizes) if opp_hand_sizes else 11
+        # Threat scales from 0.0 (safe) to 1.0 (imminent loss)
+        oracle_threat = min(1.0, max(0.0, (8.0 - min_opp_cards) / 6.0))
 
-        # Cards in observing player's private hand
-        known_count += float(self.ctx.players[player_idx].private_hand[suit, rank])
+        # ==========================================
+        # 2. ORACLE AVAILABILITY (Hidden Info)
+        # ==========================================
+        difficulty_penalty = 0.0
+        if oracle_probs is not None:
+            needed_cards = self._identify_needed_cards(player_idx)
+            for suit, rank in needed_cards:
+                # Sum the probability that ANY of the 3 opponents are holding this card
+                prob_hoarded = min(1.0, np.sum(oracle_probs[:, suit, rank]))
+                prob_available = 1.0 - prob_hoarded
 
-        # Cards publicly visible on the table
-        known_count += float(self.ctx.table_sets[suit, rank])
-        known_count += float(self.ctx.table_runs[suit, rank])
+                # If prob_available is 1.0 (in stock), penalty is 0.
+                # If prob_available is 0.0 (dead), penalty spikes dramatically.
+                # Epsilon 0.05 caps the max penalty per card to prevent math explosion.
+                difficulty_penalty += (1.0 / (prob_available + 0.05)) - 1.0
 
-        # Cards dead in the discard pile (iterating the list safely captures both buried and top card)
-        known_count += sum(
-            1.0 for c in self.ctx.discard_pile if int(c.suit) == suit and int(c.rank) == rank)
+        # ==========================================
+        # 3. THE REWARD SHAPING
+        # ==========================================
+        # Scale the difficulty down slightly so it guides rather than overrides distance
+        effective_distance = raw_distance + (difficulty_penalty * 0.15)
 
-        # 2. Deduct Oracle Predictions
-        # Sums the 0.0 to 1.0 probability across all 3 opponent channels for this specific card
-        predicted_held = float(np.sum(oracle_probs[:, suit, rank]))
+        win_component = -(effective_distance * self.win_hunger)
+        speed_penalty = current_turn * 3.0
+        tide_multiplier = 0.1 + (oracle_threat * 1.4)
 
-        # 3. Calculate Effective Outs
-        effective_outs = total_in_universe - known_count - predicted_held
+        return float(win_component - (raw_deadwood * tide_multiplier) - speed_penalty)
 
-        # Mathematically floor at 0.0 to prevent the Oracle's hallucinations
-        # (e.g., predicting 3 Aces exist) from creating negative outs.
-        return max(effective_outs, 0.0)
+    def calculate_distance_to_win(self, player_idx: int) -> float:
+        """
+        Calculates the physical distance (in cards) to the round's objective.
+        Evaluates partial progress (e.g., a pair counts as 2 valid cards towards a 3-set).
+        """
+        import numpy as np  # Ensure numpy is imported in your file
+
+        player = self.ctx.players[player_idx]
+        req_sets, req_runs = self.ctx.config.objective_map[self.ctx.current_round_idx]
+
+        # Calculate the absolute maximum distance
+        total_required_cards = (req_sets * 3) + (req_runs * 4)
+
+        if not player.hand_list:
+            return float(total_required_cards)
+
+        hand_tensor = player.private_hand
+        valid_cards = 0
+
+        # 1. Greedy Partial Sets Evaluation
+        if req_sets > 0:
+            # Sum across all 4 suits to get the total count of each rank
+            rank_counts = np.sum(hand_tensor, axis=0)
+
+            # Extract the counts (ignoring the 0 index duplicate Ace), cap them at 3, and sort
+            sorted_counts = sorted([min(3, int(rank_counts[r])) for r in range(1, 14)],
+                                   reverse=True)
+
+            # Take the best groupings up to the required amount of sets
+            valid_cards += sum(sorted_counts[:req_sets])
+
+        # 2. Greedy Partial Runs Evaluation
+        if req_runs > 0:
+            run_lengths = []
+            for suit in range(4):
+                current_run = 0
+                # Scan from Ace Low (0) to King (12) and Ace High (13)
+                for rank in range(14):
+                    if hand_tensor[suit, rank] > 0:
+                        current_run += 1
+                    else:
+                        if current_run > 0:
+                            run_lengths.append(min(4, current_run))
+                            current_run = 0
+                if current_run > 0:
+                    run_lengths.append(min(4, current_run))
+
+            # Sort the contiguous chunks and take the best ones
+            sorted_runs = sorted(run_lengths, reverse=True)
+            valid_cards += sum(sorted_runs[:req_runs])
+
+        distance = total_required_cards - valid_cards
+        return float(max(0, distance))
+
+    def _identify_needed_cards(self, player_idx: int) -> list:
+        """
+        Fast heuristic to find the 'edges' of the player's partial melds.
+        Returns a list of (suit, rank) tuples representing specific missing cards.
+        """
+        needed = set()
+        player = self.ctx.players[player_idx]
+        hand = player.private_hand  # Shape: (4, 14)
+
+        # 1. Check partial sets (e.g., have two 8s, need the other two 8s)
+        for rank in range(13):
+            count = np.sum(hand[:, rank])
+            if 1 <= count <= 2:
+                for suit in range(4):
+                    if hand[suit, rank] == 0:
+                        needed.add((suit, rank))
+
+        # 2. Check partial runs (e.g., have 4/5 of Hearts, need 3 or 6 of Hearts)
+        for suit in range(4):
+            for rank in range(13):
+                if hand[suit, rank] > 0:
+                    # Look below
+                    if rank > 1 and hand[suit, rank - 1] == 0:
+                        needed.add((suit, rank - 1))
+                    # Look above (Rank 12 is King)
+                    if rank < 12 and hand[suit, rank + 1] == 0:
+                        needed.add((suit, rank + 1))
+
+        return list(needed)
 
     def calculate_asymmetric_score(self, margin: float) -> float:
         """
-        Step 3.3: Asymmetric Terminal Scoring
-        Scales the raw point differential using the config's tournament-aware multipliers.
-        Negative margins (Trailing) use catch_up_multiplier.
-        Positive margins (Leading) use pull_ahead_multiplier.
+        Terminal scoring logic using multipliers from config.
+        Margin > 0: Trailing (Catch-up). Margin < 0: Leading (Pull-ahead).
         """
-        if margin < 0:
+        if margin > 0:
             return margin * self.ctx.config.catch_up_multiplier
-        elif margin > 0:
+        elif margin < 0:
             return margin * self.ctx.config.pull_ahead_multiplier
-        else:
-            return 0.0
+        return 0.0
 
     def _calculate_active_deadwood(self, player_idx: int) -> float:
-        """
-        Helper to calculate the exact penalty points currently sitting in a player's hand.
-        """
+        """Helper to tally physical penalty points currently in hand."""
         player = self.ctx.players[player_idx]
         deadwood = 0.0
-
         for card in player.hand_list:
             rank_val = int(card.rank)
             if rank_val == 0:  # ACE
                 deadwood += self.ctx.config.points_ace
-            elif 7 <= rank_val <= 12:  # EIGHT through KING
+            elif 7 <= rank_val <= 12:  # 8 through King
                 deadwood += self.ctx.config.points_eight_to_king
-            elif 1 <= rank_val <= 6:  # TWO through SEVEN
+            else:  # 2 through 7
                 deadwood += self.ctx.config.points_two_to_seven
-
         return deadwood
 
-    def calculate_danger_score(self, player_idx: int, suit: int, rank: int,
-                               active_deadwood: float, oracle_probs: np.ndarray) -> float:
+    def _find_max_objective_cards(self, hand: List[Card], objective: List[int]) -> int:
         """
-        Step 3.2: Danger Score Calculator (Betaori)
-        Calculates the asymmetric tournament risk of discarding a specific card.
-        If the margin is negative (Agent is winning), the Danger becomes a bonus,
-        incentivizing the Detonation Strategy.
+        Combinatorial search to find the subset of cards that fills the
+        most 'slots' in the objective.
         """
-        total_danger = 0.0
-        agent = self.ctx.players[player_idx]
+        if not hand or not objective:
+            return 0
 
-        # If the agent holds the card and the opponent goes out, the agent eats their deadwood
-        agent_projected_score = agent.score + active_deadwood
+        # 1. Identify all potential components (Sets of 2+, Runs of 2+)
+        # For 'Distance' logic, we count pairs and sequences of 2 as progress.
+        potential_sets = self._get_potential_sets(hand)
+        potential_runs = self._get_potential_runs(hand)
 
-        for i in range(1, 4):
-            # Strict Zero-Padding for missing 4th player
-            if i == 3 and self.ctx.num_players == 3:
-                continue
+        # 2. Recursive search to find best non-overlapping assignment
+        return self._backtrack_fill(objective, potential_sets, potential_runs)
 
-            target_idx = (player_idx + i) % self.ctx.num_players
-            opponent = self.ctx.players[target_idx]
+    def _get_potential_sets(self, hand):
+        ranks = {}
+        for c in hand:
+            ranks[c.rank] = ranks.get(c.rank, 0) + 1
 
-            # The probability this specific opponent needs this card to go out
-            p_needs_card = float(oracle_probs[i - 1, suit, rank])
+        # Returns list of card counts for every rank where we have at least a pair
+        return [count for count in ranks.values() if count >= 2]
 
-            if p_needs_card == 0.0:
-                continue
+    def _get_potential_runs(self, hand: List[Card]) -> List[int]:
+        """Identifies sequences of the same suit."""
+        run_counts = []
+        hand_sorted = sorted(hand, key=lambda x: (x.suit.value, x.rank.value))
 
-            # If the opponent goes out, they take 0 penalty points for this round
-            opponent_projected_score = opponent.score + 0.0
+        if not hand_sorted:
+            return []
 
-            # Calculate the Tournament Margin
-            raw_margin = agent_projected_score - opponent_projected_score
+        current_run = [hand_sorted[0]]
+        for i in range(1, len(hand_sorted)):
+            prev, curr = hand_sorted[i - 1], hand_sorted[i]
 
-            # Scale the margin using the Asymmetric Multipliers
-            asym_margin = self.calculate_asymmetric_score(raw_margin)
+            if curr.suit == prev.suit and curr.rank.value == prev.rank.value + 1:
+                current_run.append(curr)
+            elif curr.suit == prev.suit and curr.rank.value == prev.rank.value:
+                continue  # Duplicate card doesn't break run but doesn't extend it
+            else:
+                if len(current_run) >= 2:
+                    run_counts.append(len(current_run))
+                current_run = [curr]
 
-            # Accumulate the danger
-            total_danger += p_needs_card * asym_margin
+        if len(current_run) >= 2:
+            run_counts.append(len(current_run))
 
-        return total_danger
+        return run_counts
