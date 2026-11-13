@@ -279,5 +279,42 @@ class TestBaselineAgents(unittest.TestCase):
                 "Agent should pick up the 8 of Spades on its turn to build a 1-gapped run."
             )
 
+class TestHeuristicTablePlay(unittest.TestCase):
+    """HeuristicAgent places Key Cards on runs when it can, otherwise on sets."""
+
+    def setUp(self):
+        from game_context import TableRun
+        self.ctx = GameContext(num_players=4)
+        self.player = self.ctx.players[0]
+        self.player.hand_list.clear()
+        self.player.private_hand.fill(0)
+        self.player.is_down = True
+        # A set of 7s and the run ♠3-4-5-6 on the table.
+        for suit in (Suit.HEARTS, Suit.CLUBS, Suit.DIAMONDS):
+            self.ctx.table_sets[suit, Rank.SEVEN] = 1
+        self.ctx.runs_on_table.append(TableRun(Suit.SPADES, Rank.THREE, Rank.SIX))
+        for rank in range(Rank.THREE, Rank.SEVEN):
+            self.ctx.table_runs[Suit.SPADES, rank] = 1
+
+    def choose(self):
+        mask = self.ctx.get_action_mask(0, 'table_play_phase')
+        return HeuristicAgent(random_seed=0).select_action('table_play_phase', self.ctx, 0, mask)
+
+    def test_prefers_a_run_over_a_set(self):
+        from game_context import RUN_HIGH_END, place_action
+        self.player.receive_cards([Card(Suit.SPADES, Rank.SEVEN)])
+        self.assertEqual(self.choose(), place_action(Suit.SPADES, Rank.SEVEN, RUN_HIGH_END))
+
+    def test_uses_a_set_when_no_run_fits(self):
+        from game_context import ON_SET, place_action
+        self.player.receive_cards([Card(Suit.HEARTS, Rank.SEVEN)])
+        self.assertEqual(self.choose(), place_action(Suit.HEARTS, Rank.SEVEN, ON_SET))
+
+    def test_ends_table_play_when_nothing_fits(self):
+        from game_context import END_TABLE_PLAY
+        self.player.receive_cards([Card(Suit.HEARTS, Rank.KING)])
+        self.assertEqual(self.choose(), END_TABLE_PLAY)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -11,6 +11,45 @@ from player import Player
 ACE_LOW = 0
 ACE_HIGH = 13
 
+# --- Action numbering ---
+# Agents choose actions by number from a boolean mask (get_action_mask).
+PICK_STOCK, PICK_DISCARD, CALL_MAY_I, PASS, GO_DOWN, WAIT = range(6)
+END_TABLE_PLAY = WAIT  # The same action ends table play.
+
+# Where a Key Card goes when placed on the table.
+ON_SET, RUN_LOW_END, RUN_HIGH_END = range(3)
+
+DISCARD_BASE = 6                   # 6..57: discard a card
+PLACE_BASE = DISCARD_BASE + 52     # 58..213: place a card on a set / run low end / run high end
+NUM_ACTIONS = PLACE_BASE + 3 * 52
+
+
+def card_code(suit: int, rank: int) -> int:
+    """0..51 for a card's suit and rank (an Ace is rank 0)."""
+    return int(suit) * 13 + int(rank) % 13
+
+
+def discard_action(suit: int, rank: int) -> int:
+    return DISCARD_BASE + card_code(suit, rank)
+
+
+def place_action(suit: int, rank: int, destination: int) -> int:
+    return PLACE_BASE + destination * 52 + card_code(suit, rank)
+
+
+def decode_card_action(action: int) -> tuple:
+    """
+    Returns (suit, rank, destination) for a discard or place action.
+    destination is None for a discard.
+    """
+    if DISCARD_BASE <= action < PLACE_BASE:
+        destination, code = None, action - DISCARD_BASE
+    elif PLACE_BASE <= action < NUM_ACTIONS:
+        destination, code = divmod(action - PLACE_BASE, 52)
+    else:
+        raise ValueError(f"Action {action} is not a card action.")
+    return code // 13, code % 13, destination
+
 
 @dataclass(slots=True)
 class TableRun:
@@ -341,56 +380,71 @@ class GameContext:
 
     def _place_key_cards(self, player_idx):
         """
-        Places every Key Card in the player's hand. Repeats until nothing more fits,
-        because placing one card can open a run end for another.
+        Places every Key Card in the player's hand, preferring runs over sets.
+        Repeats until nothing more fits, because placing one card can open a
+        run end for another.
         """
         player = self.players[player_idx]
         placed = True
         while placed:
             placed = False
             for card in list(player.hand_list):
-                if self.is_key_card(int(card.suit), int(card.rank)):
-                    player.discard(int(card.suit), int(card.rank))
-                    self._place_on_table(int(card.suit), int(card.rank))
+                suit, rank = int(card.suit), int(card.rank)
+                destinations = self.placement_destinations(suit, rank)
+                if destinations:
+                    player.discard(suit, rank)
+                    self._place_on_table(suit, rank, destinations[-1])  # runs listed after sets
                     placed = True
 
     def is_key_card(self, suit, rank):
         """True if a card can legally be placed on some meld on the table."""
-        return bool(np.any(self.table_sets[:, rank % 13] > 0)) or self._can_extend_run(suit, rank)
+        return bool(self.placement_destinations(suit, rank))
 
-    def _extendable_run(self, suit, rank):
+    def placement_destinations(self, suit, rank):
         """
-        Returns (run, position) for the first table run this card extends, or None.
-        Runs grow only at their ends; a low Ace end (position 0) and a high Ace end
+        The distinct places a card can go: ON_SET, RUN_LOW_END and/or RUN_HIGH_END.
+        Choosing between two sets of the same rank, or two runs that share the
+        same end, never changes what can be placed later, so these three cover
+        every meaningful choice.
+        """
+        destinations = []
+        if np.any(self.table_sets[:, rank % 13] > 0):
+            destinations.append(ON_SET)
+        for end in (RUN_LOW_END, RUN_HIGH_END):
+            if self._find_run_end(suit, rank, end) is not None:
+                destinations.append(end)
+        return destinations
+
+    def _find_run_end(self, suit, rank, end):
+        """
+        Returns (run, position) for the first table run this card extends at the
+        given end, or None. A low Ace end (position 0) and a high Ace end
         (position 13) are closed.
         """
         for run in self.runs_on_table:
             if run.suit != suit:
                 continue
             for pos in _run_positions(rank):
-                if pos == run.low - 1 or pos == run.high + 1:
+                if end == RUN_LOW_END and pos == run.low - 1:
+                    return run, pos
+                if end == RUN_HIGH_END and pos == run.high + 1:
                     return run, pos
         return None
 
     def _can_extend_run(self, suit, rank):
         """True if this card can be placed at the end of a run on the table."""
-        return self._extendable_run(suit, rank) is not None
+        destinations = self.placement_destinations(suit, rank)
+        return RUN_LOW_END in destinations or RUN_HIGH_END in destinations
 
-    def _place_on_table(self, suit, rank):
-        """
-        Puts a card (already removed from a hand) onto a meld.
-        A set of that rank takes priority over a run (review item 3, pending decision).
-        """
+    def _place_on_table(self, suit, rank, destination):
+        """Puts a card (already removed from a hand) onto a meld at the chosen destination."""
         rank = rank % 13
-        if np.any(self.table_sets[:, rank] > 0):
+        if destination == ON_SET:
             self._sync_ace(self.table_sets, suit, rank, increment=True)
             return
 
-        found = self._extendable_run(suit, rank)
-        if found is None:
-            raise ValueError(f"Card {suit}-{rank} does not fit any meld on the table.")
-        run, pos = found
-        if pos < run.low:
+        run, pos = self._find_run_end(suit, rank, destination)
+        if destination == RUN_LOW_END:
             run.low = pos
         else:
             run.high = pos
@@ -418,17 +472,17 @@ class GameContext:
             int(card_to_discard.rank)
         )
 
-    def execute_table_play(self, player_idx: int, card_index: int):
-        """Moves one Key Card from the player's hand onto a meld on the table."""
+    def execute_table_play(self, player_idx: int, card_index: int, destination: int):
+        """Moves one Key Card from the player's hand onto the chosen meld destination."""
         player = self.players[player_idx]
         card = player.hand_list[card_index]
         suit, rank = int(card.suit), int(card.rank)
 
-        if not self.is_key_card(suit, rank):
-            raise ValueError(f"{card} is not a Key Card and cannot be placed.")
+        if destination not in self.placement_destinations(suit, rank):
+            raise ValueError(f"{card} cannot be placed at destination {destination}.")
 
         player.discard(suit, rank)
-        self._place_on_table(suit, rank)
+        self._place_on_table(suit, rank, destination)
 
     def start_may_i_checks(self):
         """Initializes the May-I loop to the first downstream player."""
@@ -535,49 +589,38 @@ class GameContext:
 
     def get_action_mask(self, player_idx: int, state_id: str) -> np.ndarray:
         """
-        Generates a 58-element boolean array masking illegal actions for the given phase.
-        Indices:
-        0: Pick_Stock, 1: Pick_Discard, 2: Call_MayI, 3: Pass
-        4: Go_Down, 5: Wait / End_Table_Play
-        6-57: Card identifiers (Discard or Play)
+        Boolean mask of the legal actions for the given phase (NUM_ACTIONS long).
+        See the action numbering constants at the top of this module.
         """
         state_id = state_id.lower().replace(' ', '_').replace('-', '_')
-        mask = np.zeros(58, dtype=bool)
+        mask = np.zeros(NUM_ACTIONS, dtype=bool)
         player = self.players[player_idx]
 
         if state_id == 'pickup_decision':
-            mask[0] = True  # Pick Stock is always legal
-            if len(self.discard_pile) > 0:
-                mask[1] = True  # Pick Discard requires a card in the pile
+            mask[PICK_STOCK] = True
+            if self.discard_pile:
+                mask[PICK_DISCARD] = True
 
         elif state_id == 'may_i_decision':
-            mask[2] = True  # Call May-I
-            mask[3] = True  # Pass
+            mask[CALL_MAY_I] = True
+            mask[PASS] = True
 
         elif state_id == 'go_down_decision':
-            mask[4] = True  # Go Down
-            mask[5] = True  # Wait
+            mask[GO_DOWN] = True
+            mask[WAIT] = True
 
         elif state_id == 'discard_phase':
-            # Control actions are completely disabled.
-            # Only cards currently in the physical hand are legal to discard.
             for card in player.hand_list:
-                # Calculate the exact offset: 6 + (Suit * 13) + Rank
-                card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
-                mask[card_idx] = True
-
+                mask[discard_action(card.suit, card.rank)] = True
 
         elif state_id == 'table_play_phase':
-            mask[5] = True  # End Table Play
-            # Cards in hand are ONLY legal if they actually fit an existing meld
+            mask[END_TABLE_PLAY] = True
             for card in player.hand_list:
                 suit, rank = int(card.suit), int(card.rank)
-                if self.is_key_card(suit, rank):
-                    card_idx = 6 + (int(card.suit) * 13) + int(card.rank)
-                    mask[card_idx] = True
+                for destination in self.placement_destinations(suit, rank):
+                    mask[place_action(suit, rank, destination)] = True
 
         else:
-            # We strictly enforce known states to prevent silent tensor failures
             raise ValueError(f"Cannot generate action mask for unknown state: {state_id}")
 
         return mask

@@ -1,22 +1,19 @@
-import time
 import multiprocessing
+import time
 from dataclasses import dataclass
 
 from tqdm import tqdm
 
 from fast_engine import JoeEngine
-from game_context import GameContext
+from game_context import END_TABLE_PLAY, GameContext, decode_card_action
 
 
-def _get_list_index_from_action(player, action_idx):
-    """Translates an absolute neural network logit (6-57) to a relative hand list index."""
-    target_suit = (action_idx - 6) // 13
-    target_rank = (action_idx - 6) % 13
-
+def _find_card_in_hand(player, suit, rank):
+    """Index in the player's hand list of a card with this suit and rank."""
     for i, card in enumerate(player.hand_list):
-        if int(card.suit) == target_suit and int(card.rank) == target_rank:
+        if int(card.suit) == suit and int(card.rank) == rank:
             return i
-    raise ValueError(f"CRITICAL: Card for action {action_idx} not found in player's hand!")
+    raise ValueError(f"Card {suit}-{rank} not found in player's hand!")
 
 
 def _log_stalemate_hands(ctx):
@@ -44,7 +41,7 @@ def _log_stalemate_hands(ctx):
 
 def apply_engine_action(engine: JoeEngine, ctx: GameContext, state_id: str, player_idx: int,
                         action_idx: int):
-    """Routes absolute logits to the fast_engine using strictly integers and translated list indices."""
+    """Applies an agent's chosen action number to the engine."""
     if state_id == 'pickup_decision':
         engine.resolve_pickup(action_idx)
     elif state_id == 'may_i_decision':
@@ -52,14 +49,15 @@ def apply_engine_action(engine: JoeEngine, ctx: GameContext, state_id: str, play
     elif state_id == 'go_down_decision':
         engine.resolve_go_down(action_idx)
     elif state_id == 'table_play_phase':
-        if action_idx == 5:
+        if action_idx == END_TABLE_PLAY:
             engine.end_table_play()
         else:
-            list_idx = _get_list_index_from_action(ctx.players[player_idx], action_idx)
-            engine.perform_table_play(list_idx)
+            suit, rank, destination = decode_card_action(action_idx)
+            engine.perform_table_play(_find_card_in_hand(ctx.players[player_idx], suit, rank),
+                                      destination)
     elif state_id == 'discard_phase':
-        list_idx = _get_list_index_from_action(ctx.players[player_idx], action_idx)
-        engine.perform_discard(list_idx)
+        suit, rank, _ = decode_card_action(action_idx)
+        engine.perform_discard(_find_card_in_hand(ctx.players[player_idx], suit, rank))
 
 
 # =========================================================================

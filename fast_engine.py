@@ -123,9 +123,9 @@ class JoeEngine:
         self.on_commit_melds()
         self.current_state = self.table_play_phase
 
-    def perform_table_play(self, card_index):
+    def perform_table_play(self, card_index, destination):
         self.current_state = self.processing_table_play
-        self.on_enter_processing_table_play(card_index)
+        self.on_enter_processing_table_play(card_index, destination)
 
     def evaluate_table_play(self):
         self.current_state = self.table_play_phase
@@ -212,8 +212,8 @@ class JoeEngine:
     def on_commit_melds(self):
         self.ctx.go_down(self.ctx.active_player_idx)
 
-    def on_enter_processing_table_play(self, card_index):
-        self.ctx.execute_table_play(self.ctx.active_player_idx, card_index)
+    def on_enter_processing_table_play(self, card_index, destination):
+        self.ctx.execute_table_play(self.ctx.active_player_idx, card_index, destination)
         self.evaluate_table_play()
 
     def on_enter_processing_discard(self, card_index):

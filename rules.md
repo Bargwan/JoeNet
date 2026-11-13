@@ -63,7 +63,7 @@ The opening upcard can be May-I'd like any other discard.
 
 ## 6. Going Down, Placing Key Cards & Going Out
 * **Going Down:** Once a player's hand contains the exact objective (Section 3), they may lay those melds face-up during the Action step of their turn.
-* **Placing Key Cards:** Once down, a player may place Key Cards onto any meld on the table, their own or an opponent's. They may do this on the same turn they go down.
+* **Placing Key Cards:** Once down, a player may place Key Cards onto any meld on the table, their own or an opponent's. They may do this on the same turn they go down. If a card fits more than one meld, the player chooses which one it goes on.
     * Sets can be extended with any card of that rank.
     * Runs can only be extended at their ends, keeping the suit and sequence. A run ending in a high Ace (`…-K-A`) cannot be extended at that end, and a run starting with a low Ace (`A-2-…`) cannot be extended at that end. For example, `J-Q-K-A` can only take the 10, and `A-2-3-4` can only take the 5.
 * **Permanence:** Melds are never rearranged, split or merged once placed. Placement is permanent for the rest of the Game Round.

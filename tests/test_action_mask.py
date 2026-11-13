@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from game_context import GameContext
+from game_context import NUM_ACTIONS, ON_SET, GameContext, place_action
 from cards import Card, Suit, Rank
 
 
@@ -17,7 +17,7 @@ class TestActionMasking(unittest.TestCase):
 
         mask = self.ctx.get_action_mask(self.player_idx, state_id='pickup_decision')
 
-        self.assertEqual(mask.shape, (58,), "Mask must be exactly 58 booleans.")
+        self.assertEqual(mask.shape, (NUM_ACTIONS,), "Mask must cover every action.")
         self.assertTrue(mask[0], "Pick Stock should be True")
         self.assertTrue(mask[1], "Pick Discard should be True")
         self.assertEqual(np.sum(mask), 2, "Only 2 actions should be legal.")
@@ -68,17 +68,14 @@ class TestActionMasking(unittest.TestCase):
 
     def test_table_play_phase_mask(self):
         """
-        Verify cards in hand are legal to play, AND End_Table_Play (5) is legal.
+        Verify Key Cards are legal to place at each meld they fit, AND End_Table_Play (5) is legal.
         """
-        self.player.receive_cards([Card(Suit.DIAMONDS, Rank.FIVE)])  # Offset: 6 + (3*13) + 4 = 49
+        self.player.receive_cards([Card(Suit.DIAMONDS, Rank.FIVE)])
         self.ctx.table_sets[Suit.HEARTS, Rank.FIVE] = 1
 
         mask = self.ctx.get_action_mask(self.player_idx, state_id='table_play_phase')
 
         self.assertTrue(mask[5], "End Table Play should be True")
-        self.assertTrue(mask[49], "5 of Diamonds should be True")
+        self.assertTrue(mask[place_action(Suit.DIAMONDS, Rank.FIVE, ON_SET)],
+                        "5 of Diamonds should be placeable on the set of 5s")
         self.assertEqual(np.sum(mask), 2)
-
-
-if __name__ == '__main__':
-    unittest.main()

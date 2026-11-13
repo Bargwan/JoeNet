@@ -217,8 +217,8 @@ class JoeEngine(StateMachine):
     def on_commit_melds(self):
         self.ctx.go_down(self.ctx.active_player_idx)
 
-    def on_enter_processing_table_play(self, card_index: int):
-        self.ctx.execute_table_play(self.ctx.active_player_idx, card_index)
+    def on_enter_processing_table_play(self, card_index: int, destination: int):
+        self.ctx.execute_table_play(self.ctx.active_player_idx, card_index, destination)
         self.evaluate_table_play()
 
     def on_enter_processing_discard(self, card_index: int):

@@ -1,7 +1,10 @@
 import math
 import random
 from collections import Counter
+
 import numpy as np
+
+from game_context import END_TABLE_PLAY, ON_SET, PLACE_BASE, decode_card_action, discard_action
 
 
 class Agent:
@@ -102,14 +105,18 @@ class HeuristicAgent(Agent):
 
         # --- Phase: TABLE PLAY DECISION ---
         elif state_id == 'table_play_phase':
-            valid_actions = np.where(action_mask)[0]
-            card_plays = [a for a in valid_actions if a >= 6]
-            if card_plays:
-                return card_plays[0]
-            elif 5 in valid_actions:
-                return 5
-            elif 3 in valid_actions:
-                return 3
+            # Place every Key Card, one per decision. Prefer runs (chosen at random),
+            # which tends to end rounds sooner; otherwise use a set.
+            run_plays, set_plays = [], []
+            for action in np.where(action_mask)[0]:
+                if action >= PLACE_BASE:
+                    _, _, destination = decode_card_action(action)
+                    (set_plays if destination == ON_SET else run_plays).append(int(action))
+            if run_plays:
+                return self.rng.choice(run_plays)
+            if set_plays:
+                return set_plays[0]
+            return END_TABLE_PLAY
 
         # --- Phase: DISCARD DECISION ---
         elif state_id == 'discard_phase' and hand:
@@ -349,11 +356,8 @@ class HeuristicAgent(Agent):
         return False
 
     def _get_discard_action_idx(self, card):
-        """
-        Maps a physical Card object to its index in the 58-element action_mask.
-        Math: (Suit * 13) + Rank + 6.
-        """
-        return (card.suit.value * 13) + card.rank.value + 6
+        """The action number for discarding this card."""
+        return discard_action(card.suit, card.rank)
 
 
 class OpenHandAgent(HeuristicAgent):

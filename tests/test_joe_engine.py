@@ -905,8 +905,9 @@ class TestJoeEngine(unittest.TestCase):
         # Teleport to new state (This will immediately fail because the state doesn't exist yet)
         self.engine.current_state = self.engine.table_play_phase
 
-        # ACT: Play the card at index 0
-        self.engine.perform_table_play(0)
+        # ACT: Play the card at index 0 onto the set
+        from game_context import ON_SET
+        self.engine.perform_table_play(0, ON_SET)
 
         # ASSERT: State should loop back automatically
         self.assertEqual(

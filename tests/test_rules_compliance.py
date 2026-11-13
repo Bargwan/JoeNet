@@ -17,7 +17,13 @@ import pytest
 from cards import Card, Rank, Suit
 from engine import JoeEngine as SlowEngine
 from fast_engine import JoeEngine as FastEngine
-from game_context import GameContext
+from game_context import (
+    ON_SET,
+    RUN_HIGH_END,
+    RUN_LOW_END,
+    GameContext,
+    place_action,
+)
 from tests.test_utils import verify_mass_integrity
 
 ENGINES = [pytest.param(FastEngine, id="fast_engine"), pytest.param(SlowEngine, id="engine")]
@@ -58,13 +64,26 @@ def table_with(melds_hand, round_idx):
     return ctx
 
 
-def can_place(ctx, card, player_idx=0):
-    """True if the engine offers `card` as a legal table play."""
+def offered_destinations(ctx, card, player_idx=0):
+    """The destinations (ON_SET, RUN_LOW_END, RUN_HIGH_END) the engine offers for `card`."""
     player = ctx.players[player_idx]
     player.receive_cards([card])
     mask = ctx.get_action_mask(player_idx, "table_play_phase")
     player.discard(int(card.suit), int(card.rank))
-    return bool(mask[6 + int(card.suit) * 13 + int(card.rank)])
+    return {d for d in (ON_SET, RUN_LOW_END, RUN_HIGH_END)
+            if mask[place_action(card.suit, card.rank, d)]}
+
+
+def can_place(ctx, card, player_idx=0):
+    """True if the engine offers `card` as a legal table play anywhere."""
+    return bool(offered_destinations(ctx, card, player_idx))
+
+
+def place(ctx, card, destination, player_idx=0):
+    """Places `card` from the player's hand at `destination`, as the engine would."""
+    player = ctx.players[player_idx]
+    player.receive_cards([card])
+    ctx.execute_table_play(player_idx, len(player.hand_list) - 1, destination)
 
 
 def xfail(reason):
@@ -155,6 +174,70 @@ def test_set_accepts_any_card_of_its_rank():
     assert can_place(ctx, Card(D, Rank.SEVEN))
     assert can_place(ctx, Card(S, Rank.SEVEN))  # duplicates are fine in a set
     assert not can_place(ctx, Card(D, Rank.EIGHT))
+
+
+# ---------------------------------------------------------------------------
+# Section 6: the player chooses where a Key Card goes
+# ---------------------------------------------------------------------------
+
+def table_with_7s_and_spade_run_3_to_6():
+    # Round 2 [3, 4]: a set of 7s (no spade) and ♠3-4-5-6.
+    sevens = [Card(H, Rank.SEVEN), Card(C, Rank.SEVEN), Card(D, Rank.SEVEN)]
+    return table_with(run(S, *ranks(3, 6)) + sevens, round_idx=1)
+
+
+def test_card_fitting_a_set_and_a_run_offers_both():
+    ctx = table_with_7s_and_spade_run_3_to_6()
+    assert offered_destinations(ctx, Card(S, Rank.SEVEN)) == {ON_SET, RUN_HIGH_END}
+
+
+def test_placing_on_the_run_extends_the_run():
+    ctx = table_with_7s_and_spade_run_3_to_6()
+    place(ctx, Card(S, Rank.SEVEN), RUN_HIGH_END)
+    assert can_place(ctx, Card(S, Rank.EIGHT))
+
+
+def test_placing_on_the_set_leaves_the_run_unchanged():
+    ctx = table_with_7s_and_spade_run_3_to_6()
+    place(ctx, Card(S, Rank.SEVEN), ON_SET)
+    assert not can_place(ctx, Card(S, Rank.EIGHT))
+    assert can_place(ctx, Card(S, Rank.SEVEN))  # the run's high end is still open
+
+
+def table_with_gap_between_runs():
+    # Round 3 [4, 4]: ♠2-3-4-5 and ♠7-8-9-10, with a one-card gap at ♠6.
+    return table_with(run(S, *ranks(2, 5)) + run(S, *ranks(7, 10)), round_idx=2)
+
+
+def test_card_in_a_one_card_gap_offers_both_run_ends():
+    ctx = table_with_gap_between_runs()
+    assert offered_destinations(ctx, Card(S, Rank.SIX)) == {RUN_LOW_END, RUN_HIGH_END}
+
+
+def test_gap_card_on_the_lower_run_opens_the_seven():
+    ctx = table_with_gap_between_runs()
+    place(ctx, Card(S, Rank.SIX), RUN_HIGH_END)  # ♠2-6
+    assert can_place(ctx, Card(S, Rank.SEVEN))
+    assert not can_place(ctx, Card(S, Rank.FIVE))
+
+
+def test_gap_card_on_the_upper_run_opens_the_five():
+    ctx = table_with_gap_between_runs()
+    place(ctx, Card(S, Rank.SIX), RUN_LOW_END)  # ♠6-10
+    assert can_place(ctx, Card(S, Rank.FIVE))
+    assert not can_place(ctx, Card(S, Rank.SEVEN))
+
+
+def test_ace_offers_whichever_run_end_it_fits():
+    # ♠A-2-3-4 and ♠10-J-Q-K: the second Ace only fits above the King.
+    ctx = table_with(run(S, A, *ranks(2, 4)) + run(S, *ranks(10, 10), J, Q, K), round_idx=2)
+    assert offered_destinations(ctx, Card(S, A)) == {RUN_HIGH_END}
+
+
+def test_placing_at_an_illegal_destination_is_refused():
+    ctx = table_with_spade_run_3_to_6()
+    with pytest.raises(ValueError):
+        place(ctx, Card(S, Rank.SEVEN), RUN_LOW_END)
 
 
 # ---------------------------------------------------------------------------
