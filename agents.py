@@ -1,6 +1,5 @@
 import math
 import random
-from collections import Counter
 
 import numpy as np
 
@@ -10,6 +9,13 @@ from game_context import END_TABLE_PLAY, ON_SET, PLACE_BASE, decode_card_action,
 class Agent:
     def select_action(self, state_id, ctx, player_idx, action_mask):
         raise NotImplementedError
+
+    def choose_go_down_melds(self, ctx, player_idx):
+        """
+        Which melds to lay when this agent goes down (see GameContext's meld format).
+        None lets the engine use the first valid combination.
+        """
+        return None
 
 
 class RandomAgent(Agent):
@@ -166,6 +172,26 @@ class HeuristicAgent(Agent):
     # INTERNAL EVALUATION HELPERS
     # ==========================================
 
+    def choose_go_down_melds(self, ctx, player_idx):
+        """
+        Lays the melds that leave the lowest penalty value in hand once every
+        placeable card has been placed. Ties are broken at random.
+        """
+        req_sets, req_runs = ctx.config.objective_map[ctx.current_round_idx]
+        options = ctx.find_all_melds(ctx.players[player_idx].private_hand, req_sets, req_runs)
+        if len(options) <= 1:
+            return options[0] if options else None
+
+        scored = []
+        for melds in options:
+            future = ctx.clone()
+            future.go_down(player_idx, melds)
+            future._place_key_cards(player_idx)
+            scored.append((future.hand_penalty(player_idx), melds))
+
+        lowest = min(score for score, _ in scored)
+        return self.rng.choice([melds for score, melds in scored if score == lowest])
+
     def _is_useful_pickup(self, target_card, player_idx, ctx):
         """Evaluates outstanding needs and prioritizes sequences/pairs accordingly."""
         player = ctx.players[player_idx]
@@ -255,26 +281,16 @@ class HeuristicAgent(Agent):
         if melds is None:
             return len(player.hand_list)
 
-        # Count how many copies of each card the objective melds use.
-        objective_cards = Counter()
-        for kind, a, b in melds:
-            if kind == 'run':
-                for pos in range(b, b + 4):
-                    objective_cards[(a, pos % 13)] += 1
-            else:
-                for suit in b:
-                    objective_cards[(suit, a)] += 1
+        # Cards left after laying the melds, minus any that could go on the table.
+        remaining = player.private_hand
+        for meld in melds:
+            remaining = ctx._remove_meld(remaining, meld)
 
         remaining_count = 0
-        for card in player.hand_list:
-            suit, rank = int(card.suit), int(card.rank)
-            if objective_cards[(suit, rank)] > 0:
-                objective_cards[(suit, rank)] -= 1
-                continue
-            if self._is_playable_on_table(card, ctx):
-                continue
-            remaining_count += 1
-
+        for suit in range(4):
+            for rank in range(13):
+                if remaining[suit, rank] > 0 and not ctx.is_key_card(suit, rank):
+                    remaining_count += int(remaining[suit, rank])
         return remaining_count
 
     def _calculate_go_down_probability(self, ctx, player_idx):

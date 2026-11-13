@@ -316,5 +316,44 @@ class TestHeuristicTablePlay(unittest.TestCase):
         self.assertEqual(self.choose(), END_TABLE_PLAY)
 
 
+class TestHeuristicGoDownChoice(unittest.TestCase):
+    """HeuristicAgent goes down with the melds that leave the least deadwood."""
+
+    def ctx_with_hand(self, cards):
+        ctx = GameContext(num_players=4)
+        ctx.current_round_idx = 0  # [3, 3]
+        player = ctx.players[0]
+        player.hand_list.clear()
+        player.private_hand.fill(0)
+        player.receive_cards(cards)
+        return ctx
+
+    @staticmethod
+    def three(rank):
+        return [Card(s, rank) for s in (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS)]
+
+    def test_keeps_the_lowest_value_cards_in_hand(self):
+        # Laying 9s and Kings leaves three 7s (15 points), the lowest possible.
+        ctx = self.ctx_with_hand(self.three(Rank.SEVEN) + self.three(Rank.NINE)
+                                 + self.three(Rank.KING))
+        melds = HeuristicAgent(random_seed=0).choose_go_down_melds(ctx, 0)
+        self.assertEqual(sorted(melds), [('set', Rank.NINE), ('set', Rank.KING)])
+
+    def test_counts_cards_it_can_place_straight_afterwards(self):
+        # A fourth 7 makes laying the 7s better: the extra 7 goes onto the set.
+        ctx = self.ctx_with_hand(self.three(Rank.SEVEN) + [Card(Suit.CLUBS, Rank.SEVEN)]
+                                 + self.three(Rank.NINE) + self.three(Rank.TWO))
+        melds = HeuristicAgent(random_seed=0).choose_go_down_melds(ctx, 0)
+        self.assertEqual(sorted(melds), [('set', Rank.SEVEN), ('set', Rank.NINE)])
+
+    def test_breaks_ties_at_random(self):
+        # 9s, 10s and Jacks are all worth 10 points: every option leaves 30 points.
+        ctx = self.ctx_with_hand(self.three(Rank.NINE) + self.three(Rank.TEN)
+                                 + self.three(Rank.JACK))
+        chosen = {tuple(sorted(HeuristicAgent(random_seed=s).choose_go_down_melds(ctx, 0)))
+                  for s in range(20)}
+        self.assertGreater(len(chosen), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

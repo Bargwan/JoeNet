@@ -133,7 +133,7 @@ class TestEngineParityAndBugs(unittest.TestCase):
                     idx = ctx.may_i_target_idx if state == 'may_i_decision' else ctx.active_player_idx
                     action = agents[idx].select_action(state, ctx, idx,
                                                        ctx.get_action_mask(idx, state))
-                    apply_engine_action(engine, ctx, state, idx, action)
+                    apply_engine_action(engine, ctx, state, idx, action, agents[idx])
             return [p.score for p in ctx.players]
 
         self.assertEqual(play(FastEngine, 0), play(SlowEngine, 0))

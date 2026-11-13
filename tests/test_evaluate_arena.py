@@ -70,10 +70,17 @@ class TestEvaluationArena(unittest.TestCase):
                             action_idx=0)
         mock_engine.resolve_pickup.assert_called_with(0)
 
-        # Test B: Control Logit (Logit 4 -> resolve_go_down(4))
+        # Test B: Go down with no agent -> engine picks the melds (None)
         apply_engine_action(mock_engine, ctx, state_id='go_down_decision', player_idx=0,
                             action_idx=4)
-        mock_engine.resolve_go_down.assert_called_with(4)
+        mock_engine.resolve_go_down.assert_called_with(4, None)
+
+        # Test B2: Go down with an agent -> the agent's meld choice is passed on
+        chooser = MagicMock()
+        chooser.choose_go_down_melds.return_value = [('set', 9), ('set', 7)]
+        apply_engine_action(mock_engine, ctx, state_id='go_down_decision', player_idx=0,
+                            action_idx=4, agent=chooser)
+        mock_engine.resolve_go_down.assert_called_with(4, [('set', 9), ('set', 7)])
 
         # Test C: Card Translation Logit (Logit 28 -> perform_discard(0))
         # It must translate logit 28 into the relative physical hand list index (0)
@@ -108,7 +115,7 @@ class TestEvaluationArena(unittest.TestCase):
         runner = TournamentRunner(config)
 
         # We hook into `apply_engine_action` to simulate the fast_engine transitions
-        def side_effect_apply(engine, ctx, state_id, player_idx, action_idx):
+        def side_effect_apply(engine, ctx, state_id, player_idx, action_idx, agent=None):
             # Force the active player to be Agent 0 so it gets the win credit
             ctx.active_player_idx = 0
 

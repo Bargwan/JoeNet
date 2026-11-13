@@ -210,12 +210,13 @@ class JoeEngine(StateMachine):
         elif action == 2:  # CALL_MAY_I
             self.ctx.execute_may_i_call()
 
-    def on_enter_going_down(self):
-        self.ctx.active_player.is_down = True
-        self.commit_melds()
+    def before_resolve_go_down(self, action: int, melds=None):
+        # Lay the chosen melds first: an invalid choice raises before the state changes.
+        if action == 4:  # GO_DOWN
+            self.ctx.go_down(self.ctx.active_player_idx, melds)
 
-    def on_commit_melds(self):
-        self.ctx.go_down(self.ctx.active_player_idx)
+    def on_enter_going_down(self):
+        self.commit_melds()
 
     def on_enter_processing_table_play(self, card_index: int, destination: int):
         self.ctx.execute_table_play(self.ctx.active_player_idx, card_index, destination)

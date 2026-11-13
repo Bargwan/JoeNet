@@ -44,6 +44,7 @@ class TestGameContextIntegrity(unittest.TestCase):
 
         # 2. Give player the 4th King to extend the set
         p0 = self.ctx.players[0]
+        p0.is_down = True  # only down players place Key Cards
         p0.receive_cards([Card(Suit.DIAMONDS, Rank.KING)])
 
         initial_mass = verify_mass_integrity(self, self.ctx)

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from tqdm import tqdm
 
 from fast_engine import JoeEngine
-from game_context import END_TABLE_PLAY, GameContext, decode_card_action
+from game_context import END_TABLE_PLAY, GO_DOWN, GameContext, decode_card_action
 
 
 def _find_card_in_hand(player, suit, rank):
@@ -40,14 +40,20 @@ def _log_stalemate_hands(ctx):
         f.write("\n\n")
 
 def apply_engine_action(engine: JoeEngine, ctx: GameContext, state_id: str, player_idx: int,
-                        action_idx: int):
-    """Applies an agent's chosen action number to the engine."""
+                        action_idx: int, agent=None):
+    """
+    Applies an agent's chosen action number to the engine. When the action is
+    GO_DOWN, the agent (if given) is asked which melds to lay.
+    """
     if state_id == 'pickup_decision':
         engine.resolve_pickup(action_idx)
     elif state_id == 'may_i_decision':
         engine.resolve_may_i(action_idx)
     elif state_id == 'go_down_decision':
-        engine.resolve_go_down(action_idx)
+        melds = None
+        if action_idx == GO_DOWN and agent is not None:
+            melds = agent.choose_go_down_melds(ctx, player_idx)
+        engine.resolve_go_down(action_idx, melds)
     elif state_id == 'table_play_phase':
         if action_idx == END_TABLE_PLAY:
             engine.end_table_play()
@@ -141,7 +147,7 @@ def _worker_simulate_single_game(config):
         actions_before = ctx.total_actions
         turns_before = ctx.current_circuit
 
-        apply_engine_action(engine, ctx, state_id, active_idx, action_idx)
+        apply_engine_action(engine, ctx, state_id, active_idx, action_idx, agent)
 
         if ctx.current_round_idx > prev_round_idx:
             round_actions.append(actions_before)

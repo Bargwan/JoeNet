@@ -1,4 +1,3 @@
-import itertools
 import random
 from dataclasses import dataclass
 
@@ -295,87 +294,135 @@ class GameContext:
             elif rank == 13:
                 tensor[suit, 0] = max(int(tensor[suit, 0]) - 1, 0)
 
+    # --- Melds ---
+    # A meld is a tuple:
+    #   ('run', suit, start) - 4 cards of `suit` at positions start..start+3
+    #                          (position 0 = low Ace, 13 = high Ace)
+    #   ('set', rank)        - 3 cards of `rank`. Which suits doesn't matter: any
+    #                          leftover card of that rank can go straight onto the set.
+    # Melds are minimum size; longer melds are made by placing Key Cards afterwards.
+
     def find_melds(self, tensor, sets_needed, runs_needed):
-        """
-        Recursive DFS for minimum-size melds (3-card sets, 4-card runs) meeting an objective.
+        """One combination of melds meeting the objective, or None if the hand can't."""
+        return next(self._meld_combinations(tensor, sets_needed, runs_needed), None)
 
-        Returns None if the hand cannot meet it, otherwise a list with one tuple per meld:
-          ('run', suit, start)  - 4 cards of `suit` at positions start..start+3
-                                  (position 0 = low Ace, 13 = high Ace)
-          ('set', rank, suits)  - 3 cards of `rank`, one per entry in `suits`
-        """
+    def find_all_melds(self, tensor, sets_needed, runs_needed):
+        """Every distinct combination of melds meeting the objective (possibly empty)."""
+        return list(self._meld_combinations(tensor, sets_needed, runs_needed))
+
+    def _meld_combinations(self, tensor, sets_needed, runs_needed):
+        """Yields each distinct combination of melds once, in a fixed order."""
+        candidates = self._candidate_melds(tensor)
+        yield from self._combine_melds(tensor, sets_needed, runs_needed, candidates, 0)
+
+    def _combine_melds(self, tensor, sets_needed, runs_needed, candidates, start):
         if sets_needed == 0 and runs_needed == 0:
-            return []
+            yield []
+            return
+        # Candidates are tried in list order, never going back to an earlier one,
+        # so each combination appears once. Repeating the same candidate is allowed
+        # (two sets of 7s, or two identical runs).
+        for i in range(start, len(candidates)):
+            meld = candidates[i]
+            if (meld[0] == 'run' and runs_needed == 0) or (meld[0] == 'set' and sets_needed == 0):
+                continue
+            remaining = self._remove_meld(tensor, meld)
+            if remaining is None:
+                continue
+            for rest in self._combine_melds(remaining,
+                                            sets_needed - (meld[0] == 'set'),
+                                            runs_needed - (meld[0] == 'run'),
+                                            candidates, i):
+                yield [meld] + rest
 
-        # 1. Try extracting Runs
-        if runs_needed > 0:
-            for suit in range(4):
-                for start in range(11):
-                    if np.all(tensor[suit, start:start + 4] >= 1):
-                        new_tensor = tensor.copy()
-                        for r in range(start, start + 4):
-                            self._sync_ace(new_tensor, suit, r)
+    def _candidate_melds(self, tensor):
+        """Every meld the hand could make on its own: runs first, then sets."""
+        runs = [('run', suit, start) for suit in range(4) for start in range(11)
+                if np.all(tensor[suit, start:start + 4] >= 1)]
+        sets = [('set', rank) for rank in range(13) if tensor[:, rank].sum() >= 3]
+        return runs + sets
 
-                        rest = self.find_melds(new_tensor, sets_needed, runs_needed - 1)
-                        if rest is not None:
-                            return [('run', suit, start)] + rest
+    def _set_suits(self, tensor, rank):
+        """The suits of the 3 cards a set of `rank` uses: the most plentiful suits first."""
+        counts = [int(tensor[suit, rank]) for suit in range(4)]
+        suits = []
+        for _ in range(3):
+            suit = max(range(4), key=lambda s: counts[s])
+            if counts[suit] == 0:
+                return None
+            counts[suit] -= 1
+            suits.append(suit)
+        return suits
 
-        # 2. Try extracting Sets
-        if sets_needed > 0:
-            for rank in range(13):
-                if np.sum(tensor[:, rank]) >= 3:
-                    available_suits = []
-                    for suit in range(4):
-                        for _ in range(tensor[suit, rank]):
-                            available_suits.append(suit)
+    def _meld_cards(self, tensor, meld):
+        """The (suit, rank) of each card a meld takes from this hand tensor, or None if missing."""
+        if meld[0] == 'run':
+            _, suit, start = meld
+            if not (0 <= start <= 10 and np.all(tensor[suit, start:start + 4] >= 1)):
+                return None
+            return [(suit, pos % 13) for pos in range(start, start + 4)]
+        _, rank = meld
+        suits = self._set_suits(tensor, rank)
+        return None if suits is None else [(suit, rank) for suit in suits]
 
-                    for combo in set(itertools.combinations(available_suits, 3)):
-                        new_tensor = tensor.copy()
-                        for suit in combo:
-                            self._sync_ace(new_tensor, suit, rank)
+    def _remove_meld(self, tensor, meld):
+        """A copy of the hand tensor without the meld's cards, or None if they aren't there."""
+        cards = self._meld_cards(tensor, meld)
+        if cards is None:
+            return None
+        remaining = tensor.copy()
+        for suit, rank in cards:
+            self._sync_ace(remaining, suit, rank)
+        return remaining
 
-                        rest = self.find_melds(new_tensor, sets_needed - 1, runs_needed)
-                        if rest is not None:
-                            return [('set', rank, combo)] + rest
-
-        return None
-
-    def go_down(self, player_idx):
-        """Moves the required objective melds to the table."""
+    def go_down(self, player_idx, melds=None):
+        """
+        Lays the player's objective melds on the table and marks them as down.
+        `melds` is the player's choice (see the meld format above); if None, the
+        first valid combination is used. Raises ValueError, changing nothing, if
+        the choice does not exactly meet the objective with cards in hand.
+        """
         player = self.players[player_idx]
         req_sets, req_runs = self.config.objective_map[self.current_round_idx]
 
-        melds = self.find_melds(player.private_hand, req_sets, req_runs)
         if melds is None:
-            return
+            melds = self.find_melds(player.private_hand, req_sets, req_runs)
+            if melds is None:
+                raise ValueError(f"Player {player_idx} cannot meet the objective.")
+        melds = [tuple(m) for m in melds]
 
-        for kind, a, b in melds:
-            if kind == 'run':
-                suit, start = a, b
-                for pos in range(start, start + 4):
-                    player.discard(suit, pos % 13)  # position 13 is the Ace
-                    self._sync_ace(self.table_runs, suit, pos % 13, increment=True)
+        kinds = [m[0] for m in melds]
+        if kinds.count('set') != req_sets or kinds.count('run') != req_runs \
+                or len(kinds) != req_sets + req_runs:
+            raise ValueError(f"{melds} does not match the objective "
+                             f"({req_sets} sets, {req_runs} runs).")
+
+        # Work out every card first (runs before sets, so a set never takes a card a
+        # run needs), and only then move anything.
+        hand = player.private_hand.copy()
+        laid = []
+        for meld in sorted(melds, key=lambda m: m[0] != 'run'):
+            cards = self._meld_cards(hand, meld)
+            if cards is None:
+                raise ValueError(f"Player {player_idx} does not hold the cards for {meld}.")
+            for suit, rank in cards:
+                self._sync_ace(hand, suit, rank)
+            laid.append((meld, cards))
+
+        for meld, cards in laid:
+            table = self.table_runs if meld[0] == 'run' else self.table_sets
+            for suit, rank in cards:
+                player.discard(suit, rank)
+                self._sync_ace(table, suit, rank, increment=True)
+            if meld[0] == 'run':
+                _, suit, start = meld
                 self.runs_on_table.append(TableRun(suit, start, start + 3))
-            else:
-                rank, suits = a, b
-                for suit in suits:
-                    player.discard(suit, rank)
-                    self._sync_ace(self.table_sets, suit, rank, increment=True)
+        player.is_down = True
 
     def auto_place_cards(self, player_idx):
-        """
-        The Extension Phase: Logic to handle both the initial objective
-        if not yet down, followed by deadwood extensions.
-        """
-        player = self.players[player_idx]
-
-        # 1. If this is a direct call and the player isn't down yet,
-        # try to commit the initial batch first.
-        if not player.is_down:
+        """Goes down (if not already) with the first valid melds, then places every Key Card."""
+        if not self.players[player_idx].is_down:
             self.go_down(player_idx)
-            player.is_down = True
-
-        # 2. Now perform the card-by-card scan for everything else
         self._place_key_cards(player_idx)
 
     def _place_key_cards(self, player_idx):

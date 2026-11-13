@@ -18,6 +18,7 @@ from cards import Card, Rank, Suit
 from engine import JoeEngine as SlowEngine
 from fast_engine import JoeEngine as FastEngine
 from game_context import (
+    GO_DOWN,
     ON_SET,
     RUN_HIGH_END,
     RUN_LOW_END,
@@ -238,6 +239,114 @@ def test_placing_at_an_illegal_destination_is_refused():
     ctx = table_with_spade_run_3_to_6()
     with pytest.raises(ValueError):
         place(ctx, Card(S, Rank.SEVEN), RUN_LOW_END)
+
+
+# ---------------------------------------------------------------------------
+# Section 6: the player chooses which melds to go down with
+# ---------------------------------------------------------------------------
+
+def three_of(rank, suits=(S, H, D)):
+    return [Card(suit, rank) for suit in suits]
+
+
+def ctx_with_hand(cards, round_idx):
+    ctx = GameContext(num_players=4)
+    ctx.current_round_idx = round_idx
+    player = ctx.players[0]
+    player.hand_list.clear()
+    player.private_hand.fill(0)
+    player.receive_cards(cards)
+    return ctx
+
+
+SEVENS_NINES_QUEENS = three_of(Rank.SEVEN) + three_of(Rank.NINE) + three_of(Q)
+
+
+def test_find_all_melds_lists_each_way_to_go_down_once():
+    ctx = ctx_with_hand(SEVENS_NINES_QUEENS, round_idx=0)  # [3, 3]
+    options = ctx.find_all_melds(ctx.players[0].private_hand, 2, 0)
+    assert sorted(options) == sorted([
+        [('set', Rank.SEVEN), ('set', Rank.NINE)],
+        [('set', Rank.SEVEN), ('set', Q)],
+        [('set', Rank.NINE), ('set', Q)],
+    ])
+
+
+def test_go_down_lays_the_chosen_sets():
+    ctx = ctx_with_hand(SEVENS_NINES_QUEENS, round_idx=0)
+    ctx.go_down(0, [('set', Rank.NINE), ('set', Q)])
+
+    assert sorted(int(c.rank) for c in ctx.players[0].hand_list) == [Rank.SEVEN] * 3
+    assert can_place(ctx, Card(C, Rank.NINE))
+    assert not can_place(ctx, Card(C, Rank.SEVEN))
+
+
+def test_go_down_lays_the_chosen_ace_high_run():
+    # ♠A-2-3-4 or ♠J-Q-K-A from a single Ace; the player picks J-Q-K-A.
+    hand = run(S, A, *ranks(2, 4), J, Q, K) + FILLER_SET_OF_9S
+    ctx = ctx_with_hand(hand, round_idx=1)  # [3, 4]
+    ctx.go_down(0, [('set', Rank.NINE), ('run', S, 10)])
+
+    assert sorted(int(c.rank) for c in ctx.players[0].hand_list) == [Rank.TWO, Rank.THREE,
+                                                                       Rank.FOUR]
+    assert can_place(ctx, Card(S, Rank.TEN))
+    assert not can_place(ctx, Card(S, Rank.FIVE))
+
+
+def test_go_down_lets_a_set_and_run_share_a_rank_in_any_order():
+    # ♠7 must go in the run; the set of 7s uses the other three.
+    hand = run(S, *ranks(4, 7)) + three_of(Rank.SEVEN, (H, C, D))
+    ctx = ctx_with_hand(hand, round_idx=1)
+    ctx.go_down(0, [('set', Rank.SEVEN), ('run', S, 3)])
+    assert ctx.players[0].hand_list == []
+
+
+@pytest.mark.parametrize("melds", [
+    pytest.param([('set', Rank.NINE)], id="too few melds"),
+    pytest.param([('set', Rank.NINE), ('set', Q), ('set', Rank.SEVEN)], id="too many melds"),
+    pytest.param([('set', Rank.NINE), ('set', K)], id="cards not held"),
+    pytest.param([('set', Rank.NINE), ('run', S, 3)], id="wrong kind of meld"),
+])
+def test_go_down_refuses_an_invalid_choice_and_changes_nothing(melds):
+    ctx = ctx_with_hand(SEVENS_NINES_QUEENS, round_idx=0)
+    with pytest.raises(ValueError):
+        ctx.go_down(0, melds)
+    assert len(ctx.players[0].hand_list) == 9
+    assert not ctx.players[0].is_down
+    assert ctx.table_sets.sum() == 0 and ctx.runs_on_table == []
+
+
+def reach_go_down_decision(engine_cls):
+    """First turn of round 1 [3, 3], with the active player holding 7s, 9s and Queens."""
+    ctx, engine = start_first_turn(engine_cls)
+    player = ctx.active_player
+    player.hand_list.clear()
+    player.private_hand.fill(0)
+    player.receive_cards(SEVENS_NINES_QUEENS + [Card(C, Rank.TWO), Card(C, Rank.FIVE)])
+    engine.resolve_pickup(0)
+    may_i_offers(ctx, engine)
+    assert engine.state_id == "go_down_decision"
+    return ctx, engine
+
+
+@pytest.mark.parametrize("engine_cls", ENGINES)
+def test_engine_goes_down_with_the_chosen_melds(engine_cls):
+    ctx, engine = reach_go_down_decision(engine_cls)
+    engine.resolve_go_down(GO_DOWN, [('set', Rank.SEVEN), ('set', Q)])
+
+    assert engine.state_id == "table_play_phase"
+    assert ctx.active_player.is_down
+    assert ctx.table_sets[:, Rank.SEVEN].sum() == 3
+    assert ctx.table_sets[:, Q].sum() == 3
+    assert ctx.table_sets[:, Rank.NINE].sum() == 0
+
+
+@pytest.mark.parametrize("engine_cls", ENGINES)
+def test_engine_refuses_an_invalid_go_down_choice(engine_cls):
+    ctx, engine = reach_go_down_decision(engine_cls)
+    with pytest.raises(ValueError):
+        engine.resolve_go_down(GO_DOWN, [('set', K), ('set', Q)])
+    assert not ctx.active_player.is_down
 
 
 # ---------------------------------------------------------------------------
